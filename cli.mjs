@@ -152,6 +152,9 @@ if (dataYaml) {
   }
 }
 
+// Extract validate function from template metadata
+const validateFn = template.metadata?.validate || null;
+
 // Render System Prompt
 if (template.spec && template.spec.system_prompt) {
   try {
@@ -164,6 +167,12 @@ if (template.spec && template.spec.system_prompt) {
     console.error(`Failed to render system prompt: ${e.message}`);
     process.exit(1);
   }
+}
+
+// Append validation prompt if validate function is present
+if (validateFn) {
+  const validationPrompt = `\n\nYour reply must cause the following function to return truthy:\n\`\`\`js\n${validateFn}\`\`\``;
+  template.spec.system_prompt = (template.spec.system_prompt || '') + validationPrompt;
 }
 
 // Initialize Plugins
@@ -408,18 +417,78 @@ async function runLoop() {
       
       // Only terminate when finish_reason indicates completion
       if (finishReason === 'stop' || finishReason === 'end_turn') {
-        Utils.logInfo(`Session complete (finish_reason: ${finishReason})`);
-        // Log overall process time
-        const overallDuration = (Date.now() - processStartTime) / 1000;
-        logPerf('process-end', { 'overall(s)': overallDuration });
-        
-        // Output the final response
-        if (outputPath) {
-          fs.writeFileSync(outputPath, lastAssistantContent);
+        // If validate function is present, eval it against the response
+        if (validateFn) {
+          let validationResult;
+          try {
+            // Create a function that evaluates the validate code and passes the reply
+            const validateCode = `
+              const reply = arguments[0];
+              ${validateFn}
+            `;
+            const fn = new Function(validateCode);
+            validationResult = fn(lastAssistantContent);
+          } catch (e) {
+            validationResult = `Validation error: ${e.message}`;
+          }
+          
+          if (!validationResult) {
+            Utils.logInfo(`Validation failed, result: ${JSON.stringify(validationResult)}`);
+            
+            // Check turn limit before continuing
+            if (turnLimit && turnCount >= turnLimit) {
+              Utils.logInfo(`Turn limit reached (${turnCount}/${turnLimit}), exiting despite validation failure...`);
+              const overallDuration = (Date.now() - processStartTime) / 1000;
+              logPerf('process-end', { 'overall(s)': overallDuration });
+              
+              if (outputPath) {
+                fs.writeFileSync(outputPath, lastAssistantContent);
+              } else {
+                process.stdout.write(lastAssistantContent + '\n');
+              }
+              running = false;
+            } else {
+              // Add validation failure message and continue loop
+              const validationMsg = `Your reply caused the function to return: ${JSON.stringify(validationResult)}. Please correct your reply syntax.`;
+              const currentSession = SessionModel.load(sessionId);
+              currentSession.spec.messages.push({
+                role: 'user',
+                content: validationMsg,
+                timestamp: new Date().toISOString()
+              });
+              SessionModel.save(sessionId, currentSession);
+              Utils.logInfo(`Sent validation correction prompt, continuing...`);
+            }
+          } else {
+            // Validation passed - output YAML serialized result instead of assistant content
+            Utils.logInfo(`Session complete (finish_reason: ${finishReason}, validation passed)`);
+            const overallDuration = (Date.now() - processStartTime) / 1000;
+            logPerf('process-end', { 'overall(s)': overallDuration });
+            
+            // Serialize validation result to YAML
+            const yamlOutput = yaml.dump(validationResult);
+            if (outputPath) {
+              fs.writeFileSync(outputPath, yamlOutput);
+            } else {
+              process.stdout.write(yamlOutput);
+            }
+            running = false;
+          }
         } else {
-          process.stdout.write(lastAssistantContent + '\n');
+          // No validation - proceed as before
+          Utils.logInfo(`Session complete (finish_reason: ${finishReason})`);
+          // Log overall process time
+          const overallDuration = (Date.now() - processStartTime) / 1000;
+          logPerf('process-end', { 'overall(s)': overallDuration });
+          
+          // Output the final response
+          if (outputPath) {
+            fs.writeFileSync(outputPath, lastAssistantContent);
+          } else {
+            process.stdout.write(lastAssistantContent + '\n');
+          }
+          running = false;
         }
-        running = false;
       } else {
         // AI returned content but didn't signal termination - continue loop
         Utils.logInfo(`AI returned content with finish_reason: ${finishReason}, continuing...`);
