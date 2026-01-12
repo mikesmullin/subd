@@ -175,6 +175,11 @@ if (validateFn) {
   template.spec.system_prompt = (template.spec.system_prompt || '') + validationPrompt;
 }
 
+// Log final system prompt in verbose mode
+if (verbose && template.spec?.system_prompt) {
+  console.error(`\x1b[94m[SYSTEM PROMPT]\n${template.spec.system_prompt}\x1b[0m`);
+}
+
 // Initialize Plugins
 globals.config.unattended = true;
 new CorePlugin();
