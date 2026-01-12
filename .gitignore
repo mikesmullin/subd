@@ -1,0 +1,23 @@
+# secrets
+.env
+.tokens.yaml
+
+# logs and temporary files
+db/*
+agent/sessions/*
+agent/sessions/*.yml
+agent/sessions/*.yaml
+
+# npm modules
+node_modules/
+
+# temporary files
+tmp/
+TODO.md
+daemon.lock
+*.sock
+daemon.log
+PROMPT.md
+
+# vscode
+.bun-cache-copy/

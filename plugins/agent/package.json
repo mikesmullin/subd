@@ -1,0 +1,12 @@
+{
+  "name": "@daemon/agent",
+  "version": "3.0.0",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "ejs": "^3.1.10",
+    "ollama": "^0.6.3",
+    "openai": "^6.9.1"
+  },
+  "private": true,
+  "type": "module"
+}

@@ -1,0 +1,34 @@
+name: daemon-v3
+concurrency: 10
+tickInterval: 1000
+pasteDetectionThreshold: 150
+unattended: false
+current: 0
+metricsInterval: 5000
+log:
+  level: info
+  format: pretty
+  outputs:
+    - stdio
+    - filesystem
+  filePath: ./logs/daemon.log
+container:
+  runtime: podman
+  image: daemon-v3-image
+dashboard:
+  widgets:
+    - name: agent.sessions
+      col: 0
+      row: 0
+      width: 30
+      height: 8
+    - name: human__questions__count
+      col: 32
+      row: 0
+      width: 30
+      height: 8
+    - name: human.approvals.count
+      col: 0
+      row: 8
+      width: 30
+      height: 8

@@ -1,0 +1,7 @@
+{
+  "name": "daemon-plugin-web",
+  "type": "module",
+  "dependencies": {
+    "puppeteer": "^24.31.0"
+  }
+}

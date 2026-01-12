@@ -1,0 +1,9 @@
+{
+  "name": "@daemon/shell",
+  "version": "3.0.0",
+  "dependencies": {
+    "bun-pty": "^0.3.2"
+  },
+  "private": true,
+  "type": "module"
+}

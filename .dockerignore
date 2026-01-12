@@ -1,0 +1,32 @@
+# Node/Bun dependencies - must be rebuilt inside container for native libs
+node_modules/
+bun.lockb
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Temp and logs
+tmp/
+*.log
+daemon.log
+*.sock
+daemon.lock
+
+# Database files (will be mounted)
+agent/sessions/*.yml
+agent/groups/*.yml
+agent/workspaces/
+
+# Test files
+tests/
+*.test.js
+*.test.mjs
+
+# Docker
+Dockerfile
+.dockerignore
