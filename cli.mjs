@@ -70,6 +70,7 @@ let dataYaml = null;
 let outputPath = null;
 let verbose = false;
 let turnLimit = null;
+let readStdinFlag = false;
 let promptParts = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -83,9 +84,20 @@ for (let i = 0; i < args.length; i++) {
     verbose = true;
   } else if (args[i] === '-l') {
     turnLimit = parseInt(args[++i], 10);
+  } else if (args[i] === '-i') {
+    readStdinFlag = true;
   } else {
     promptParts.push(args[i]);
   }
+}
+
+// Helper for templates to read stdin (only if -i flag was passed)
+let stdinCache = null;
+async function readStdin() {
+  if (!readStdinFlag) return '';
+  if (stdinCache !== null) return stdinCache;
+  stdinCache = await Bun.stdin.text();
+  return stdinCache;
 }
 
 // Initialize Logger
@@ -122,7 +134,7 @@ function logAssistant(text) {
 const userPrompt = promptParts.join(' ');
 
 if (!templatePath || !userPrompt) {
-  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] <prompt...>');
+  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-i] [-l <turns>] <prompt...>');
   process.exit(1);
 }
 
@@ -175,7 +187,7 @@ if (template.spec && template.spec.system_prompt) {
       ...data,
       process,
       os,
-      Bun
+      readStdin
     }, { async: true });
   } catch (e) {
     console.error(`Failed to render system prompt: ${e.message}`);
