@@ -180,6 +180,10 @@ if (dataYaml) {
 // Extract validate function from template metadata
 const validateFn = template.metadata?.validate || null;
 
+// Extract loop control limits from template metadata
+const maxTurns = template.metadata?.max_turns || null;
+const maxValidationFails = template.metadata?.max_validation_fails || null;
+
 // Render System Prompt
 if (template.spec && template.spec.system_prompt) {
   try {
@@ -359,12 +363,16 @@ async function runLoop() {
   let running = true;
   let lastAssistantContent = '';
   let turnCount = 0;
+  let validationFailCount = 0;
+  
+  // Effective turn limit: CLI -l flag takes precedence, then template max_turns
+  const effectiveTurnLimit = turnLimit || maxTurns;
   
   while (running) {
     const messages = await getChatMessages(sessionId);
     const tools = await getTools(sessionId);
 
-    Utils.logInfo(`Calling AI with ${tools?.length || 0} tools...${turnLimit ? ` (turn ${turnCount + 1}/${turnLimit})` : ''}`);
+    Utils.logInfo(`Calling AI with ${tools?.length || 0} tools...${effectiveTurnLimit ? ` (turn ${turnCount + 1}/${effectiveTurnLimit})` : ''}`);
     turnCount++;
     
     const apiStartTime = Date.now();
@@ -423,20 +431,9 @@ async function runLoop() {
       await handleToolCalls(sessionId, combinedMessage.tool_calls);
       
       // Check turn limit after processing tool calls
-      if (turnLimit && turnCount >= turnLimit) {
-        Utils.logInfo(`Turn limit reached (${turnCount}/${turnLimit}), exiting...`);
-        const overallDuration = (Date.now() - processStartTime) / 1000;
-        logPerf('process-end', { 'overall(s)': overallDuration });
-        
-        // Output the last assistant content if any
-        if (combinedMessage.content) {
-          if (outputPath) {
-            fs.writeFileSync(outputPath, combinedMessage.content);
-          } else {
-            process.stdout.write(combinedMessage.content + '\n');
-          }
-        }
-        running = false;
+      if (effectiveTurnLimit && turnCount >= effectiveTurnLimit) {
+        console.error(`No answer could be returned; max turns (${effectiveTurnLimit}) reached.`);
+        process.exit(1);
       }
     } else {
       // No tool calls - check finish_reason to determine if session is complete
@@ -465,23 +462,22 @@ async function runLoop() {
           }
           
           if (!validationResult) {
-            Utils.logInfo(`Validation failed, result: ${JSON.stringify(validationResult)}`);
+            validationFailCount++;
+            Utils.logInfo(`Validation failed (${validationFailCount}${maxValidationFails ? '/' + maxValidationFails : ''}), result: ${JSON.stringify(validationResult)}`);
+            
+            // Check max validation fails limit
+            if (maxValidationFails && validationFailCount >= maxValidationFails) {
+              console.error(`No answer could be returned; the LLM failed to construct an answer that could pass validation in (${maxValidationFails}) attempts.`);
+              process.exit(1);
+            }
             
             // Check turn limit before continuing
-            if (turnLimit && turnCount >= turnLimit) {
-              Utils.logInfo(`Turn limit reached (${turnCount}/${turnLimit}), exiting despite validation failure...`);
-              const overallDuration = (Date.now() - processStartTime) / 1000;
-              logPerf('process-end', { 'overall(s)': overallDuration });
-              
-              if (outputPath) {
-                fs.writeFileSync(outputPath, lastAssistantContent);
-              } else {
-                process.stdout.write(lastAssistantContent + '\n');
-              }
-              running = false;
+            if (effectiveTurnLimit && turnCount >= effectiveTurnLimit) {
+              console.error(`No answer could be returned; max turns (${effectiveTurnLimit}) reached.`);
+              process.exit(1);
             } else {
               // Add validation failure message and continue loop
-              const validationMsg = `Your reply failed validation because the validation function returned: ${JSON.stringify(validationResult)}. Please review the javascript validation function code provided, and adapt your reply to conform strictly.`;
+              const validationMsg = `Your reply failed validation because the validation function returned: ${JSON.stringify(validationResult)}. Please review the javascript validation function code provided, and adapt your reply to conform strictly, paying attention to spacing.`;
               const currentSession = SessionModel.load(sessionId);
               currentSession.spec.messages.push({
                 role: 'user',
