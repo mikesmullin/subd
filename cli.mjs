@@ -456,7 +456,7 @@ async function runLoop() {
               running = false;
             } else {
               // Add validation failure message and continue loop
-              const validationMsg = `Your reply caused the function to return: ${JSON.stringify(validationResult)}. Please correct your reply syntax.`;
+              const validationMsg = `Your reply failed validation because the validation function returned: ${JSON.stringify(validationResult)}. Please review the javascript validation function code provided, and adapt your reply to conform strictly.`;
               const currentSession = SessionModel.load(sessionId);
               currentSession.spec.messages.push({
                 role: 'user',
