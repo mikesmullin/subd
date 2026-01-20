@@ -69,6 +69,7 @@ let templatePath = null;
 let dataYaml = null;
 let outputPath = null;
 let verbose = false;
+let strict = false;
 let turnLimit = null;
 let readStdinFlag = false;
 let promptParts = [];
@@ -82,6 +83,8 @@ for (let i = 0; i < args.length; i++) {
     outputPath = args[++i];
   } else if (args[i] === '-v') {
     verbose = true;
+  } else if (args[i] === '--strict') {
+    strict = true;
   } else if (args[i] === '-l') {
     turnLimit = parseInt(args[++i], 10);
   } else if (args[i] === '-i') {
@@ -449,14 +452,27 @@ async function runLoop() {
         // If validate function is present, eval it against the response
         if (validateFn) {
           let validationResult;
+          let matchedPortion = null;
           try {
             // Create a function that evaluates the validate code and passes the reply
+            // We intercept String.prototype.match to capture what the validator matched on
             const validateCode = `
               const reply = arguments[0];
-              ${validateFn}
+              const captureMatch = arguments[1];
+              const originalMatch = String.prototype.match;
+              String.prototype.match = function(regex) {
+                const result = originalMatch.call(this, regex);
+                if (result && result[0]) captureMatch(result[0]);
+                return result;
+              };
+              try {
+                ${validateFn}
+              } finally {
+                String.prototype.match = originalMatch;
+              }
             `;
             const fn = new Function(validateCode);
-            validationResult = fn(lastAssistantContent);
+            validationResult = fn(lastAssistantContent, (m) => { matchedPortion = m; });
           } catch (e) {
             validationResult = `Validation error: ${e.message}`;
           }
@@ -488,17 +504,32 @@ async function runLoop() {
               Utils.logInfo(`Sent validation correction prompt, continuing...`);
             }
           } else {
-            // Validation passed - output YAML serialized result instead of assistant content
+            // Validation passed
             Utils.logInfo(`Session complete (finish_reason: ${finishReason}, validation passed)`);
             const overallDuration = (Date.now() - processStartTime) / 1000;
             logPerf('process-end', { 'overall(s)': overallDuration });
             
             // Serialize validation result to YAML
             const yamlOutput = yaml.dump(validationResult);
-            if (outputPath) {
-              fs.writeFileSync(outputPath, yamlOutput);
+            
+            let finalOutput;
+            if (strict) {
+              // Strict mode: only output the validated YAML
+              finalOutput = yamlOutput;
             } else {
-              process.stdout.write(yamlOutput);
+              // Default: replace matched portion with --- separator + YAML
+              if (matchedPortion && lastAssistantContent.includes(matchedPortion)) {
+                finalOutput = lastAssistantContent.replace(matchedPortion, '---\n' + yamlOutput);
+              } else {
+                // Fallback if no match captured: append separator + YAML
+                finalOutput = lastAssistantContent + '\n---\n' + yamlOutput;
+              }
+            }
+            
+            if (outputPath) {
+              fs.writeFileSync(outputPath, finalOutput);
+            } else {
+              process.stdout.write(finalOutput);
             }
             running = false;
           }

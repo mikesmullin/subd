@@ -7,7 +7,7 @@ metadata:
   labels:
   - subagent
   validate: |
-    const match = reply.match(/1\.\sId:\s*([\w\d\-_]+)\s*\n+\s*2\.\sPriority:\s*(HIGH|MED|LOW)\s*\n+\s*3\.\sUrgent:\s*(Yes|No)\s*\n+\s*4\.\sImportant:\s*(Yes|No)\s*\n+\s*5\.\sRationale:\s*(.{10,240})$/);
+    const match = reply.match(/1\.\sId:\s*([\w\d\-_]+)\s*\n+\s*2\.\sPriority:\s*(HIGH|MED|LOW)\s*\n+\s*3\.\sUrgent:\s*(Yes|No)\s*\n+\s*4\.\sImportant:\s*(Yes|No)\s*\n+\s*5\.\sRationale:\s*(.{10,240})$/s);
     return match ? {
         id: match[1], // this is the user-provided identifier reference, echo'ed back at them (so they know which item you're working on)
         priority: match[2],
@@ -31,9 +31,7 @@ spec:
         - Urgency vs. Importance
       - Linear Programming
 
-    Your goal: help me assess priority for the given tasks.
-
-    In this code block is context being passed-in from a parent/orchestrator agent:
+    Here is the context in which the request is being made:
     <context_from_orchestrator>
     <%= await readStdin() %>
     </context_from_orchestrator>
