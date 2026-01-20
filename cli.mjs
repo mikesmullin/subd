@@ -158,11 +158,12 @@ const validateFn = template.metadata?.validate || null;
 // Render System Prompt
 if (template.spec && template.spec.system_prompt) {
   try {
-    template.spec.system_prompt = ejs.render(template.spec.system_prompt, { 
+    template.spec.system_prompt = await ejs.render(template.spec.system_prompt, { 
       ...data,
       process,
-      os
-    });
+      os,
+      Bun
+    }, { async: true });
   } catch (e) {
     console.error(`Failed to render system prompt: ${e.message}`);
     process.exit(1);
