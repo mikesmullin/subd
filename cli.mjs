@@ -192,8 +192,9 @@ new HumanPlugin();
 
 // Create Session
 const sessionId = SessionModel.generateId();
+const templateName = path.basename(fullTemplatePath, path.extname(fullTemplatePath));
 Utils.logInfo(`Creating session ${sessionId}...`);
-const session = SessionModel.create(sessionId, { template });
+const session = SessionModel.create(sessionId, { template, name: templateName });
 session.spec.messages = [
   { role: 'user', content: userPrompt, timestamp: new Date().toISOString() }
 ];
