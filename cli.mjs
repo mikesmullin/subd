@@ -50,8 +50,21 @@ import { AgentPlugin } from './plugins/agent/controllers/agent.mjs';
 import { HumanPlugin } from './plugins/human/index.mjs';
 import { ReplPlugin } from './plugins/repl/index.mjs';
 
-// Parse Args
+// Handle subcommands
 const args = process.argv.slice(2);
+if (args[0] === 'clean') {
+  const sessionsDir = path.resolve(import.meta.dirname, 'agent/sessions');
+  const files = fs.existsSync(sessionsDir) 
+    ? fs.readdirSync(sessionsDir).filter(f => f.endsWith('.yml'))
+    : [];
+  for (const file of files) {
+    fs.unlinkSync(path.join(sessionsDir, file));
+  }
+  console.log(`Removed ${files.length} session file(s).`);
+  process.exit(0);
+}
+
+// Parse Args
 let templatePath = null;
 let dataYaml = null;
 let outputPath = null;
