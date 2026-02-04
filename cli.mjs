@@ -142,12 +142,22 @@ if (!templatePath || !userPrompt) {
 }
 
 // Resolve template path
+// Search order:
+//   1. cwd/.agent/templates/<template_file>
+//   2. ~/.config/daemon/agent/templates/<template_file>
+//   3. <workspace>/agent/templates/<template_file>
+// If template_file has no extension, .yaml is appended
 function resolveTemplatePath(p) {
+  // Normalize: append .yaml if no extension provided
+  const templateFile = path.extname(p) ? p : p + '.yaml';
+  
   const searchPaths = [
-    path.resolve(process.cwd(), p),
-    path.resolve(process.cwd(), p + '.yaml'),
-    path.resolve(globals.dbPaths.templates, p),
-    path.resolve(globals.dbPaths.templates, p + '.yaml')
+    // Current directory (where process is running)
+    path.resolve(process.cwd(), '.agent/templates', templateFile),
+    // Home directory config
+    path.resolve(os.homedir(), '.config/daemon/agent/templates', templateFile),
+    // Workspace directory (where the .mjs files are located)
+    path.resolve(globals.dbPaths.templates, templateFile)
   ];
 
   for (const sp of searchPaths) {
