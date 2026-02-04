@@ -2,114 +2,33 @@ import { globals } from '../../common/globals.mjs';
 import { Utils } from '../../common/utils.mjs';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 
-const ALLOWLIST_PATH = path.join(globals.PROJECT_ROOT, 'plugins/shell/storage/terminal-cmd-allowlist.yaml');
+// User-configurable allowlist stored in ~/.config/daemon/plugins/shell/storage/
+const USER_CONFIG_DIR = path.join(os.homedir(), '.config', 'daemon', 'plugins', 'shell', 'storage');
+const USER_ALLOWLIST_PATH = path.join(USER_CONFIG_DIR, 'terminal-cmd-allowlist.yaml');
+// Example file shipped with the repo (copied to user config on first run)
+const EXAMPLE_ALLOWLIST_PATH = path.join(globals.PROJECT_ROOT, 'plugins/shell/storage/terminal-cmd-allowlist.yaml.example');
 let cachedAllowlist = null;
-
-const DEFAULT_ALLOWLIST = {
-  "cd": true,
-  "echo": true,
-  "ls": true,
-  "pwd": true,
-  "cat": true,
-  "head": true,
-  "tail": true,
-  "findstr": true,
-  "wc": true,
-  "tr": true,
-  "cut": true,
-  "cmp": true,
-  "which": true,
-  "basename": true,
-  "dirname": true,
-  "realpath": true,
-  "readlink": true,
-  "stat": true,
-  "file": true,
-  "du": true,
-  "df": true,
-  "sleep": true,
-  "git status": true,
-  "git log": true,
-  "git show": true,
-  "git diff": true,
-  "Get-ChildItem": true,
-  "Get-Content": true,
-  "Get-Date": true,
-  "Get-Random": true,
-  "Get-Location": true,
-  "Write-Host": true,
-  "Write-Output": true,
-  "Split-Path": true,
-  "Join-Path": true,
-  "Start-Sleep": true,
-  "Where-Object": true,
-  "/^Select-[a-z0-9]/i": true,
-  "/^Measure-[a-z0-9]/i": true,
-  "/^Compare-[a-z0-9]/i": true,
-  "/^Format-[a-z0-9]/i": true,
-  "/^Sort-[a-z0-9]/i": true,
-  "column": true,
-  "/^column\\b.*-c\\s+[0-9]{4,}/": false,
-  "date": true,
-  "/^date\\b.*(-s|--set)\\b/": false,
-  "find": true,
-  "/^find\\b.*-(delete|exec|execdir|fprint|fprintf|fls|ok|okdir)\\b/": false,
-  "grep": true,
-  "/^grep\\b.*-(f|P)\\b/": false,
-  "sort": true,
-  "/^sort\\b.*-(o|S)\\b/": false,
-  "tree": true,
-  "/^tree\\b.*-o\\b/": false,
-  "rm": false,
-  "rmdir": false,
-  "del": false,
-  "Remove-Item": false,
-  "ri": false,
-  "rd": false,
-  "erase": false,
-  "dd": false,
-  "kill": false,
-  "ps": false,
-  "top": false,
-  "Stop-Process": false,
-  "spps": false,
-  "taskkill": false,
-  "taskkill.exe": false,
-  "curl": false,
-  "wget": false,
-  "Invoke-RestMethod": false,
-  "Invoke-WebRequest": false,
-  "irm": false,
-  "iwr": false,
-  "chmod": false,
-  "chown": false,
-  "Set-ItemProperty": false,
-  "sp": false,
-  "Set-Acl": false,
-  "jq": false,
-  "xargs": false,
-  "eval": false,
-  "Invoke-Expression": false,
-  "iex": false
-};
 
 export async function loadAllowlist() {
   if (cachedAllowlist) {
     return cachedAllowlist;
   }
 
-  if (!fs.existsSync(ALLOWLIST_PATH)) {
-    const dir = path.dirname(ALLOWLIST_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  // Check if user config exists in ~/.config/daemon/...
+  if (!fs.existsSync(USER_ALLOWLIST_PATH)) {
+    // Create the user config directory if it doesn't exist
+    if (!fs.existsSync(USER_CONFIG_DIR)) {
+      fs.mkdirSync(USER_CONFIG_DIR, { recursive: true });
+    }
     
-    const yaml = Bun.YAML.stringify(DEFAULT_ALLOWLIST);
-    fs.writeFileSync(ALLOWLIST_PATH, yaml);
-    cachedAllowlist = DEFAULT_ALLOWLIST;
-    return cachedAllowlist;
+    // Copy the example file to user config location
+    fs.copyFileSync(EXAMPLE_ALLOWLIST_PATH, USER_ALLOWLIST_PATH);
+    Utils.logInfo(`Created user allowlist config at ${USER_ALLOWLIST_PATH}`);
   }
 
-  const file = fs.readFileSync(ALLOWLIST_PATH, 'utf8');
+  const file = fs.readFileSync(USER_ALLOWLIST_PATH, 'utf8');
   cachedAllowlist = Bun.YAML.parse(file);
   return cachedAllowlist;
 }
