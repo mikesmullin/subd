@@ -49,4 +49,8 @@ spec:
     <%= new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) %>
     </context>
 
+    here is the user's current request (prefixed by the history of the session):
+    <context_history>
     <%= await readStdin() %>
+    </context_history>
+    if the user says `go` they are just expecting you to process the above request.
