@@ -70,6 +70,7 @@ let dataYaml = null;
 let outputPath = null;
 let verbose = false;
 let strict = false;
+let jsonlMode = false;
 let turnLimit = null;
 let readStdinFlag = false;
 let promptParts = [];
@@ -85,6 +86,8 @@ for (let i = 0; i < args.length; i++) {
     verbose = true;
   } else if (args[i] === '--strict') {
     strict = true;
+  } else if (args[i] === '-j') {
+    jsonlMode = true;
   } else if (args[i] === '-l') {
     turnLimit = parseInt(args[++i], 10);
   } else if (args[i] === '-i') {
@@ -103,12 +106,28 @@ async function readStdin() {
   return stdinCache;
 }
 
+// JSONL output helper for machine-parseable output
+// Types: system_prompt, user_prompt, assistant, tool_call, tool_result, thoughts, perf, error, info, final
+function jsonlOut(type, data, stream = 'stdout') {
+  const obj = { type, timestamp: new Date().toISOString(), ...data };
+  const line = JSON.stringify(obj);
+  if (stream === 'stderr') {
+    console.error(line);
+  } else {
+    console.log(line);
+  }
+}
+
 // Initialize Logger
 Utils.setLogLevel(verbose ? 'debug' : 'warn');
 Utils.setLogHandler((level, message) => {
   // Send all logs to stderr so stdout can be used for the final response
   if (Utils.shouldLog(level)) {
-    console.error(message);
+    if (jsonlMode) {
+      jsonlOut('log', { level, message }, 'stderr');
+    } else {
+      console.error(message);
+    }
   }
 });
 
@@ -116,28 +135,40 @@ Utils.setLogHandler((level, message) => {
 const processStartTime = Date.now();
 function logPerf(label, stats) {
   if (!verbose) return;
-  const parts = Object.entries(stats).map(([k, v]) => {
-    if (typeof v === 'number') return `${k}=${v.toFixed(3)}`;
-    return `${k}=${v}`;
-  });
-  console.error(`\x1b[95m[PERF] ${label}: ${parts.join(' ')}\x1b[0m`);
+  if (jsonlMode) {
+    jsonlOut('perf', { label, stats }, 'stderr');
+  } else {
+    const parts = Object.entries(stats).map(([k, v]) => {
+      if (typeof v === 'number') return `${k}=${v.toFixed(3)}`;
+      return `${k}=${v}`;
+    });
+    console.error(`\x1b[95m[PERF] ${label}: ${parts.join(' ')}\x1b[0m`);
+  }
 }
 
 // Colored output helpers for verbose mode
 function logThoughts(text) {
   if (!verbose || !text) return;
-  console.error(`\x1b[90m[THOUGHTS] ${text}\x1b[0m`); // Grey
+  if (jsonlMode) {
+    jsonlOut('thoughts', { content: text }, 'stderr');
+  } else {
+    console.error(`\x1b[90m[THOUGHTS] ${text}\x1b[0m`); // Grey
+  }
 }
 
 function logAssistant(text) {
   if (!verbose || !text) return;
-  console.error(`\x1b[33m[ASSISTANT] ${text}\x1b[0m`); // Yellow
+  if (jsonlMode) {
+    jsonlOut('assistant', { content: text }, 'stderr');
+  } else {
+    console.error(`\x1b[33m[ASSISTANT] ${text}\x1b[0m`); // Yellow
+  }
 }
 
 const userPrompt = promptParts.join(' ');
 
 if (!templatePath || !userPrompt) {
-  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-i] [-l <turns>] <prompt...>');
+  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] <prompt...>');
   process.exit(1);
 }
 
@@ -220,7 +251,11 @@ if (validateFn) {
 
 // Log final system prompt in verbose mode
 if (verbose && template.spec?.system_prompt) {
-  console.error(`\x1b[94m[SYSTEM PROMPT]\n${template.spec.system_prompt}\x1b[0m`);
+  if (jsonlMode) {
+    jsonlOut('system_prompt', { content: template.spec.system_prompt }, 'stderr');
+  } else {
+    console.error(`\x1b[94m[SYSTEM PROMPT]\n${template.spec.system_prompt}\x1b[0m`);
+  }
 }
 
 // Initialize Plugins
@@ -242,6 +277,11 @@ session.spec.messages = [
 ];
 SessionModel.save(sessionId, session);
 SessionModel.collection.save();
+
+// Log user prompt in JSONL mode
+if (jsonlMode) {
+  jsonlOut('user_prompt', { content: userPrompt }, 'stderr');
+}
 
 // Initialize Provider based on model string from template
 const modelStr = template.metadata?.model || 'xai:grok-3';
@@ -331,7 +371,11 @@ async function executeSingleTool(sessionId, toolCall) {
   let cmdArgs = {};
   try { cmdArgs = JSON.parse(argsStr); } catch (e) {}
   
-  Utils.logInfo(`Tool Call: ${toolName}(${argsStr})`);
+  if (jsonlMode) {
+    jsonlOut('tool_call', { name: toolName, arguments: cmdArgs, tool_call_id: toolCall.id }, 'stderr');
+  } else {
+    Utils.logInfo(`Tool Call: ${toolName}(${argsStr})`);
+  }
   const handler = globals.dslRegistry.get(toolName);
   if (!handler) return { role: 'tool', tool_call_id: toolCall.id, name: toolName, content: `Error: Tool ${toolName} not found`, timestamp: new Date().toISOString() };
 
@@ -346,7 +390,11 @@ async function executeSingleTool(sessionId, toolCall) {
 
     // Log tool result in verbose mode (cyan color)
     if (verbose) {
-      console.error(`\x1b[36m[TOOL RESULT] ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}\x1b[0m`);
+      if (jsonlMode) {
+        jsonlOut('tool_result', { name: toolName, tool_call_id: toolCall.id, content, status: result.status || 'success' }, 'stderr');
+      } else {
+        console.error(`\x1b[36m[TOOL RESULT] ${content.substring(0, 500)}${content.length > 500 ? '...' : ''}\x1b[0m`);
+      }
     }
 
     logPerf(`tool:${toolName}`, { 'duration(s)': toolDuration });
@@ -357,7 +405,11 @@ async function executeSingleTool(sessionId, toolCall) {
     logPerf(`tool:${toolName}`, { 'duration(s)': toolDuration, error: true });
     const content = `Exception: ${e.message}`;
     if (verbose) {
-      console.error(`\x1b[36m[TOOL RESULT] ${content}\x1b[0m`);
+      if (jsonlMode) {
+        jsonlOut('tool_result', { name: toolName, tool_call_id: toolCall.id, content, status: 'error' }, 'stderr');
+      } else {
+        console.error(`\x1b[36m[TOOL RESULT] ${content}\x1b[0m`);
+      }
     }
     return { role: 'tool', tool_call_id: toolCall.id, name: toolName, content, timestamp: new Date().toISOString() };
   }
@@ -445,7 +497,12 @@ async function runLoop() {
       
       // Check turn limit after processing tool calls
       if (effectiveTurnLimit && turnCount >= effectiveTurnLimit) {
-        console.error(`No answer could be returned; max turns (${effectiveTurnLimit}) reached.`);
+        const errorMsg = `No answer could be returned; max turns (${effectiveTurnLimit}) reached.`;
+        if (jsonlMode) {
+          jsonlOut('error', { message: errorMsg, code: 'MAX_TURNS_REACHED' }, 'stderr');
+        } else {
+          console.error(errorMsg);
+        }
         process.exit(1);
       }
     } else {
@@ -453,8 +510,6 @@ async function runLoop() {
       // Track the last assistant content for final output
       if (combinedMessage.content) {
         lastAssistantContent = combinedMessage.content;
-        // In verbose mode, log intermediate responses in yellow
-        logAssistant(combinedMessage.content);
       }
       
       // Only terminate when finish_reason indicates completion
@@ -493,13 +548,23 @@ async function runLoop() {
             
             // Check max validation fails limit
             if (maxValidationFails && validationFailCount >= maxValidationFails) {
-              console.error(`No answer could be returned; the LLM failed to construct an answer that could pass validation in (${maxValidationFails}) attempts.`);
+              const errorMsg = `No answer could be returned; the LLM failed to construct an answer that could pass validation in (${maxValidationFails}) attempts.`;
+              if (jsonlMode) {
+                jsonlOut('error', { message: errorMsg, code: 'MAX_VALIDATION_FAILS' }, 'stderr');
+              } else {
+                console.error(errorMsg);
+              }
               process.exit(1);
             }
             
             // Check turn limit before continuing
             if (effectiveTurnLimit && turnCount >= effectiveTurnLimit) {
-              console.error(`No answer could be returned; max turns (${effectiveTurnLimit}) reached.`);
+              const errorMsg = `No answer could be returned; max turns (${effectiveTurnLimit}) reached.`;
+              if (jsonlMode) {
+                jsonlOut('error', { message: errorMsg, code: 'MAX_TURNS_REACHED' }, 'stderr');
+              } else {
+                console.error(errorMsg);
+              }
               process.exit(1);
             } else {
               // Add validation failure message and continue loop
@@ -539,7 +604,11 @@ async function runLoop() {
             if (outputPath) {
               fs.writeFileSync(outputPath, finalOutput);
             } else {
-              process.stdout.write(finalOutput);
+              if (jsonlMode) {
+                jsonlOut('final', { content: finalOutput, validated: true });
+              } else {
+                process.stdout.write(finalOutput);
+              }
             }
             running = false;
           }
@@ -554,12 +623,18 @@ async function runLoop() {
           if (outputPath) {
             fs.writeFileSync(outputPath, lastAssistantContent);
           } else {
-            process.stdout.write(lastAssistantContent + '\n');
+            if (jsonlMode) {
+              jsonlOut('final', { content: lastAssistantContent });
+            } else {
+              process.stdout.write(lastAssistantContent + '\n');
+            }
           }
           running = false;
         }
       } else {
         // AI returned content but didn't signal termination - continue loop
+        // Log intermediate responses in verbose mode
+        if (lastAssistantContent) logAssistant(lastAssistantContent);
         Utils.logInfo(`AI returned content with finish_reason: ${finishReason}, continuing...`);
       }
     }
@@ -569,6 +644,10 @@ async function runLoop() {
 try {
     await runLoop();
 } catch (e) {
-    Utils.logError(`Fatal Error: ${e.message}`);
+    if (jsonlMode) {
+      jsonlOut('error', { message: e.message, code: 'FATAL_ERROR', stack: e.stack }, 'stderr');
+    } else {
+      Utils.logError(`Fatal Error: ${e.message}`);
+    }
     process.exit(1);
 }

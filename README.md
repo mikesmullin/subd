@@ -21,6 +21,7 @@ subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] <prom
 - `-d`: (Optional) Input data (expects YAML flow syntax); used to provide values for EJS template replacement.
 - `-o`: (Optional) Output file. If not provided, output is written to stdout.
 - `-v`: (Optional) Verbose mode. Prints performance stats, thoughts, and tool results to stderr.
+- `-j`: (Optional) JSONL output mode. Every line logged is wrapped in a JSON object for machine parsing.
 - `-l`: (Optional) Limit the number of AI turns before exiting. Useful for single-shot tool execution.
 - `prompt...`: (Required) The initial user prompt.
 
@@ -52,6 +53,34 @@ Shadows breathe and grow.
 Endless blue above,
 Clouds like white ships sailing by,
 Sunlight warms the air.
+```
+
+### JSONL Output Mode
+
+When using `-j` flag, all output is wrapped in JSON objects (one per line) for machine parsing. Each line contains:
+
+- `type`: The type of output (see below)
+- `timestamp`: ISO 8601 timestamp
+- Additional fields depending on type
+
+**Output Types:**
+
+| Type | Stream | Description |
+|------|--------|-------------|
+| `system_prompt` | stderr | The rendered system prompt |
+| `user_prompt` | stderr | The initial user prompt |
+| `assistant` | stderr | Intermediate assistant responses (verbose) |
+| `tool_call` | stderr | Tool invocation with name and arguments |
+| `tool_result` | stderr | Tool execution result |
+| `thoughts` | stderr | AI reasoning/thinking content |
+| `perf` | stderr | Performance metrics |
+| `log` | stderr | General log messages |
+| `error` | stderr | Error messages with code |
+| `final` | stdout | Final assistant response |
+
+**Example:**
+```bash
+subd -t haiku -j "Write a haiku" 2>&1 | jq -c 'select(.type == "final")'
 ```
 
 ## Features
