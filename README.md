@@ -27,7 +27,7 @@ subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] [-s] 
 - `-a`: (Internal) Agent/container mode. Set automatically for the process running inside a sandbox container; not intended for normal manual use.
 - `prompt...`: (Required) The initial user prompt.
 
-### Sandbox Image (Podman)
+### Sandbox Container (via Podman)
 
 Build the sandbox image once (or after code/dependency changes):
 
@@ -36,6 +36,38 @@ podman build -t subd:latest .
 ```
 
 `-s` mode uses this image via `podman run`.
+
+### `cmd_proxy` in Sandbox Mode
+
+Some CLIs (`jira` in this example) may require host-only binaries (to prevent llm from decompiling/modification) or host-only secrets files (to prevent llm from reading). In `-s` mode, you can expose those commands safely to the containerized agent via `cmd_proxy`:
+
+- Inside the container, `jira` is a symlink to `cmd_proxy`.
+- `cmd_proxy` forwards command + args over the sandbox bridge socket to the host `subd` process.
+- The host `subd` process checks a dedicated `cmd_proxy` allowlist.
+- If allowed, host executes the real command and streams `stdout`/`stderr` back to `cmd_proxy`, which exits with the same exit code.
+
+This keeps the real host binary and secrets outside the container while still allowing normal shell usage from the agent.
+
+#### Template Configuration (`cmd_proxy` allowlist)
+
+Use a separate allowlist in template metadata:
+
+```yaml
+metadata:
+  cmd_proxy:
+    allowlist:
+      jira: true
+  tools:
+    - shell__execute:
+        allowlist:
+          jira: true
+```
+
+Notes:
+
+- `shell__execute.allowlist` controls what can be invoked inside the container shell.
+- `cmd_proxy.allowlist` controls what proxied commands may execute on the host.
+- (Recommended) Keep `cmd_proxy.allowlist` minimal (severely constrained) for security.
 
 ### Example: Automated Processing
 

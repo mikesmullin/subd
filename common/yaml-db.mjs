@@ -132,6 +132,10 @@ export class YamlCollection {
   }
 
   get(id) {
+    if (this.items.has(id)) {
+      return this.items.get(id);
+    }
+
     const cachedPath = this.filePaths.get(id);
     if (cachedPath) {
       this._loadFile(id, cachedPath);

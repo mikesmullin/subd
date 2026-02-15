@@ -47,6 +47,11 @@ Contains identification and configuration for the agent.
     - Examples: `copilot:gpt-4o`, `anthropic:claude-3-5-sonnet`, `xai:grok-4-fast-reasoning`, `ollama:llama3`.
 - **`tools`**: An array of tool identifiers. Tools are usually named as `plugin__category__action` (e.g., `fs__file__read`, `shell__execute`).
 - **`labels`**: An array of strings used to tag agents (e.g., `subagent`, `specialized`).
+- **`cmd_proxy.allowlist`**: Optional host-side command allowlist for sandbox command proxy execution.
+  - This is separate from `shell__execute.allowlist`.
+  - `shell__execute.allowlist` controls commands executed inside the sandbox container.
+  - `cmd_proxy.allowlist` controls commands proxied to execute on the host outside the container.
+  - Keep this list minimal and highly constrained.
 
 ### `spec` (Required)
 Contains the operational logic of the agent.

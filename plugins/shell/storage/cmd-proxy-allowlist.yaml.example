@@ -1,0 +1,6 @@
+# Command Proxy Allowlist
+# This allowlist applies only to host-side command execution initiated via cmd_proxy
+# from sandbox containers. Keep this list severely constrained.
+# User config location: ~/.config/daemon/plugins/shell/storage/cmd-proxy-allowlist.yaml
+
+# (empty by default)

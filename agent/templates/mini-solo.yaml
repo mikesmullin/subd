@@ -4,6 +4,9 @@ kind: Agent
 metadata:
   description: General purpose agent with a reasonable set of tools
   model: xai:grok-4-fast-reasoning # Optimized Grok 4 for efficient reasoning tasks.,"Balanced speed/cost, tool calling.",Real-time decision-making.
+  cmd_proxy:
+    allowlist:
+      jira: true
   tools:
   - fs__file__create
   - fs__file__view
@@ -15,6 +18,7 @@ metadata:
   - shell__execute:
       allowlist:
         subd: true
+        jira: true
         ls: true
         stat: true
   - web__fetch

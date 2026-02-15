@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { globals } from './common/globals.mjs';
 import { Utils } from './common/utils.mjs';
+import { checkCmdProxyCommand, loadCmdProxyAllowlist } from './plugins/shell/cmd-proxy-allowlist.mjs';
 import { SessionModel, SessionState } from './plugins/agent/models/session.mjs';
 import { TemplateModel } from './plugins/agent/models/template.mjs';
 
@@ -128,6 +129,26 @@ async function executeToolOnHost(toolName, args, context = {}, toolOptions = nul
   }
 }
 
+async function resolveCmdProxyAllowlist(templatePath) {
+  if (templatePath) {
+    const resolvedPath = resolveTemplatePath(templatePath);
+    if (resolvedPath) {
+      try {
+        const content = fs.readFileSync(resolvedPath, 'utf8');
+        const template = yaml.load(content) || {};
+        const templateAllowlist = template?.metadata?.cmd_proxy?.allowlist;
+        if (templateAllowlist && typeof templateAllowlist === 'object') {
+          return templateAllowlist;
+        }
+      } catch (error) {
+        Utils.logWarn(`Failed to parse template cmd_proxy allowlist from ${resolvedPath}: ${error.message}`);
+      }
+    }
+  }
+
+  return await loadCmdProxyAllowlist();
+}
+
 const providerInstanceCache = new Map();
 async function createChatCompletionOnHost(modelStr, messages, tools) {
   let cached = providerInstanceCache.get(modelStr);
@@ -145,9 +166,36 @@ async function createChatCompletionOnHost(modelStr, messages, tools) {
   });
 }
 
-async function startSandboxTcpServer(authToken) {
+async function startSandboxTcpServer(authToken, options = {}) {
+  const cmdProxyAllowlist = options.cmdProxyAllowlist || await loadCmdProxyAllowlist();
+
   const server = net.createServer((socket) => {
     let buffer = '';
+    const proxyProcesses = new Map();
+
+    const killProxyProcess = (requestId) => {
+      const child = proxyProcesses.get(requestId);
+      if (!child) return;
+      proxyProcesses.delete(requestId);
+      try {
+        child.kill('SIGTERM');
+      } catch {}
+    };
+
+    const sendSocketMessage = (payload) => {
+      try {
+        socket.write(JSON.stringify(payload) + '\n');
+      } catch {}
+    };
+
+    const cleanupProxyProcesses = () => {
+      for (const requestId of proxyProcesses.keys()) {
+        killProxyProcess(requestId);
+      }
+    };
+
+    socket.on('close', cleanupProxyProcesses);
+    socket.on('error', cleanupProxyProcesses);
 
     socket.on('data', async (data) => {
       buffer += data.toString();
@@ -165,11 +213,11 @@ async function startSandboxTcpServer(authToken) {
         }
 
         if (request?.token !== authToken) {
-          socket.write(JSON.stringify({
+          sendSocketMessage({
             id: request?.id,
             ok: false,
             error: 'Unauthorized sandbox bridge request'
-          }) + '\n');
+          });
           continue;
         }
 
@@ -177,22 +225,22 @@ async function startSandboxTcpServer(authToken) {
           if (request?.type === 'spawn_subd') {
             const forwardArgs = sanitizeForwardArgs(Array.isArray(request.args) ? request.args.map(String) : []);
             const result = await spawnSubdOnHost(forwardArgs);
-            socket.write(JSON.stringify({ id: request.id, ...result }) + '\n');
+            sendSocketMessage({ id: request.id, ...result });
           } else if (request?.type === 'resolve_template') {
             const resolvedPath = resolveTemplatePath(request.templatePath);
             if (!resolvedPath) {
-              socket.write(JSON.stringify({
+              sendSocketMessage({
                 id: request.id,
                 ok: false,
                 error: `Template not found: ${request.templatePath}`
-              }) + '\n');
+              });
             } else {
               const content = fs.readFileSync(resolvedPath, 'utf8');
-              socket.write(JSON.stringify({ id: request.id, ok: true, resolvedPath, content }) + '\n');
+              sendSocketMessage({ id: request.id, ok: true, resolvedPath, content });
             }
           } else if (request?.type === 'ai_completion') {
             const response = await createChatCompletionOnHost(request.modelStr, request.messages || [], request.tools);
-            socket.write(JSON.stringify({ id: request.id, ok: true, response }) + '\n');
+            sendSocketMessage({ id: request.id, ok: true, response });
           } else if (request?.type === 'tool_call') {
             const result = await executeToolOnHost(
               request.toolName,
@@ -200,20 +248,109 @@ async function startSandboxTcpServer(authToken) {
               request.context || {},
               request.toolOptions || null
             );
-            socket.write(JSON.stringify({ id: request.id, ok: true, result }) + '\n');
+            sendSocketMessage({ id: request.id, ok: true, result });
+          } else if (request?.type === 'session_save') {
+            const sessionId = request?.sessionId ? String(request.sessionId) : null;
+            const sessionData = request?.sessionData;
+            if (!sessionId || !sessionData || typeof sessionData !== 'object') {
+              sendSocketMessage({ id: request.id, ok: false, error: 'Invalid session_save payload' });
+              continue;
+            }
+
+            SessionModel.save(sessionId, sessionData);
+            sendSocketMessage({ id: request.id, ok: true });
+          } else if (request?.type === 'cmd_proxy_exec_start') {
+            const command = typeof request.command === 'string' ? request.command.trim() : '';
+            const commandArgs = Array.isArray(request.args) ? request.args.map(String) : [];
+
+            if (!command) {
+              sendSocketMessage({ id: request.id, ok: false, error: 'Missing command for cmd_proxy execution' });
+              continue;
+            }
+
+            const commandLine = [command, ...commandArgs].join(' ');
+            const allowCheck = await checkCmdProxyCommand(commandLine, { allowlist: cmdProxyAllowlist });
+            if (!allowCheck.approved) {
+              sendSocketMessage({ id: request.id, ok: false, error: `cmd_proxy command rejected: ${allowCheck.reason}` });
+              continue;
+            }
+
+            const child = spawn(command, commandArgs, {
+              cwd: process.cwd(),
+              env: process.env,
+              stdio: ['pipe', 'pipe', 'pipe']
+            });
+            proxyProcesses.set(request.id, child);
+
+            child.stdout.on('data', (chunk) => {
+              sendSocketMessage({
+                id: request.id,
+                ok: true,
+                stream: 'stdout',
+                chunk: Buffer.from(chunk).toString('base64')
+              });
+            });
+
+            child.stderr.on('data', (chunk) => {
+              sendSocketMessage({
+                id: request.id,
+                ok: true,
+                stream: 'stderr',
+                chunk: Buffer.from(chunk).toString('base64')
+              });
+            });
+
+            child.on('error', (error) => {
+              proxyProcesses.delete(request.id);
+              sendSocketMessage({ id: request.id, ok: false, error: `cmd_proxy execution failed: ${error.message}` });
+            });
+
+            child.on('close', (code) => {
+              proxyProcesses.delete(request.id);
+              sendSocketMessage({
+                id: request.id,
+                ok: true,
+                event: 'exit',
+                exitCode: code ?? 1
+              });
+            });
+
+            sendSocketMessage({ id: request.id, ok: true, event: 'started' });
+          } else if (request?.type === 'cmd_proxy_stdin') {
+            const child = proxyProcesses.get(request.id);
+            if (!child) {
+              sendSocketMessage({ id: request.id, ok: false, error: 'No active cmd_proxy process for stdin chunk' });
+              continue;
+            }
+
+            const chunk = typeof request.chunk === 'string' ? request.chunk : '';
+            if (chunk) {
+              try {
+                child.stdin.write(Buffer.from(chunk, 'base64'));
+              } catch (error) {
+                sendSocketMessage({ id: request.id, ok: false, error: `Failed to write stdin chunk: ${error.message}` });
+              }
+            }
+          } else if (request?.type === 'cmd_proxy_stdin_end') {
+            const child = proxyProcesses.get(request.id);
+            if (child) {
+              try {
+                child.stdin.end();
+              } catch {}
+            }
           } else {
-            socket.write(JSON.stringify({
+            sendSocketMessage({
               id: request?.id,
               ok: false,
               error: `Unsupported request type: ${request?.type || 'unknown'}`
-            }) + '\n');
+            });
           }
         } catch (error) {
-          socket.write(JSON.stringify({
+          sendSocketMessage({
             id: request?.id,
             ok: false,
             error: error.message
-          }) + '\n');
+          });
         }
       }
     });
@@ -361,6 +498,19 @@ async function requestToolCallFromHost(bridgeConfig, payload) {
   return response.result;
 }
 
+async function requestSessionSaveFromHost(bridgeConfig, payload) {
+  const response = await sendSocketRequestToHost(bridgeConfig, {
+    type: 'session_save',
+    ...payload
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Host session save request failed');
+  }
+
+  return response;
+}
+
 // Handle subcommands
 const args = process.argv.slice(2);
 if (args[0] === 'clean') {
@@ -437,7 +587,8 @@ globals.subdContext = {
   requestSpawnSubdFromHost: (forwardArgs) => requestSpawnSubdFromHost(sandboxBridgeConfig, forwardArgs),
   requestTemplateFromHost: (requestedTemplatePath) => requestTemplateFromHost(sandboxBridgeConfig, requestedTemplatePath),
   requestAICompletionFromHost: (payload) => requestAICompletionFromHost(sandboxBridgeConfig, payload),
-  requestToolCallFromHost: (payload) => requestToolCallFromHost(sandboxBridgeConfig, payload)
+  requestToolCallFromHost: (payload) => requestToolCallFromHost(sandboxBridgeConfig, payload),
+  requestSessionSaveFromHost: (payload) => requestSessionSaveFromHost(sandboxBridgeConfig, payload)
 };
 
 // Helper for templates to read stdin (only if -i flag was passed)
@@ -489,6 +640,16 @@ function logPerf(label, stats) {
   }
 }
 
+function unwrapSingleCodeFence(text) {
+  if (typeof text !== 'string') return text;
+  const trimmed = text.trim();
+  const match = trimmed.match(/^```[\w-]*\n([\s\S]*?)\n```$/);
+  if (!match) {
+    return text;
+  }
+  return match[1];
+}
+
 // Colored output helpers for verbose mode
 function logThoughts(text) {
   if (!verbose || !text) return;
@@ -523,6 +684,8 @@ if (sandboxMode && !agentMode) {
   let sandboxPort = null;
 
   try {
+    const sandboxCmdProxyAllowlist = await resolveCmdProxyAllowlist(templatePath);
+
     // Initialize tool registry on host so socket-routed tool calls can execute here.
     globals.config.unattended = true;
     new CorePlugin();
@@ -533,7 +696,9 @@ if (sandboxMode && !agentMode) {
     new HumanPlugin();
     new SubdPlugin();
 
-    const started = await startSandboxTcpServer(sandboxToken);
+    const started = await startSandboxTcpServer(sandboxToken, {
+      cmdProxyAllowlist: sandboxCmdProxyAllowlist
+    });
     sandboxServer = started.server;
     sandboxPort = started.port;
 
@@ -685,6 +850,19 @@ new AgentPlugin();
 new HumanPlugin();
 new SubdPlugin();
 
+async function persistSession(sessionId, sessionData) {
+  if (agentMode) {
+    SessionModel.collection.set(sessionId, sessionData);
+    await globals.subdContext.requestSessionSaveFromHost({
+      sessionId,
+      sessionData
+    });
+    return;
+  }
+
+  SessionModel.save(sessionId, sessionData);
+}
+
 // Create Session
 const sessionId = SessionModel.generateId();
 const templateName = path.basename(fullTemplatePath, path.extname(fullTemplatePath));
@@ -693,8 +871,7 @@ const session = SessionModel.create(sessionId, { template, name: templateName })
 session.spec.messages = [
   { role: 'user', content: userPrompt, timestamp: new Date().toISOString() }
 ];
-SessionModel.save(sessionId, session);
-SessionModel.collection.save();
+await persistSession(sessionId, session);
 
 // Log user prompt in JSONL mode
 if (jsonlMode) {
@@ -845,7 +1022,7 @@ async function handleToolCalls(sessionId, toolCalls) {
     const toolResultMessage = await executeSingleTool(sessionId, toolCall);
     currentSession.spec.messages.push(toolResultMessage);
   }
-  SessionModel.save(sessionId, currentSession);
+  await persistSession(sessionId, currentSession);
 }
 
 async function runLoop() {
@@ -918,7 +1095,7 @@ async function runLoop() {
     
     const currentSession = SessionModel.load(sessionId);
     currentSession.spec.messages.push(combinedMessage);
-    SessionModel.save(sessionId, currentSession);
+    await persistSession(sessionId, currentSession);
 
     if (combinedMessage.tool_calls && combinedMessage.tool_calls.length > 0) {
       // Has tool calls - log content in verbose mode and continue
@@ -1005,7 +1182,7 @@ async function runLoop() {
                 content: validationMsg,
                 timestamp: new Date().toISOString()
               });
-              SessionModel.save(sessionId, currentSession);
+              await persistSession(sessionId, currentSession);
               Utils.logInfo(`Sent validation correction prompt, continuing...`);
             }
           } else {
@@ -1048,15 +1225,17 @@ async function runLoop() {
           // Log overall process time
           const overallDuration = (Date.now() - processStartTime) / 1000;
           logPerf('process-end', { 'overall(s)': overallDuration });
+
+          const normalizedFinalOutput = unwrapSingleCodeFence(lastAssistantContent);
           
           // Output the final response
           if (outputPath) {
-            fs.writeFileSync(outputPath, lastAssistantContent);
+            fs.writeFileSync(outputPath, normalizedFinalOutput);
           } else {
             if (jsonlMode) {
-              jsonlOut('final', { content: lastAssistantContent });
+              jsonlOut('final', { content: normalizedFinalOutput });
             } else {
-              process.stdout.write(lastAssistantContent + '\n');
+              process.stdout.write(normalizedFinalOutput + '\n');
             }
           }
           running = false;
