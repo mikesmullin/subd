@@ -1,6 +1,6 @@
-# Node/Bun dependencies - must be rebuilt inside container for native libs
+# Node/Bun dependencies - rebuilt inside image
 node_modules/
-bun.lockb
+plugins/**/node_modules/
 
 # Git
 .git/
@@ -10,6 +10,11 @@ bun.lockb
 .vscode/
 .idea/
 
+# Local/sensitive host-only files
+.env
+.tokens.yaml
+.copilotignore
+
 # Temp and logs
 tmp/
 *.log
@@ -17,10 +22,18 @@ daemon.log
 *.sock
 daemon.lock
 
+# Docs and metadata not needed at runtime
+*.md
+LICENSE
+Dockerfile
+
 # Database files (will be mounted)
+db/
 agent/sessions/*.yml
 agent/groups/*.yml
 agent/workspaces/
+agent/templates/
+agent/sessions/
 
 # Test files
 tests/
@@ -28,5 +41,4 @@ tests/
 *.test.mjs
 
 # Docker
-Dockerfile
-.dockerignore
+# Keep Dockerfile/.dockerignore in context

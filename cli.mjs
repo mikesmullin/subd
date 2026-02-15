@@ -4,39 +4,39 @@ import path from 'path';
 import ejs from 'ejs';
 import yaml from 'js-yaml';
 import os from 'os';
+import net from 'net';
+import { spawn, spawnSync } from 'child_process';
 import { globals } from './common/globals.mjs';
 import { Utils } from './common/utils.mjs';
 import { SessionModel, SessionState } from './plugins/agent/models/session.mjs';
 import { TemplateModel } from './plugins/agent/models/template.mjs';
-import { XAIProvider } from './plugins/agent/models/providers/xai.mjs';
-import { OllamaProvider } from './plugins/agent/models/providers/ollama.mjs';
-import { LlamaCppProvider } from './plugins/agent/models/providers/llamacpp.mjs';
-import { GeminiProvider } from './plugins/agent/models/providers/gemini.mjs';
-import { CopilotProvider } from './plugins/agent/models/providers/copilot.mjs';
 
 // Provider registry
 const providerRegistry = {
-  'xai': XAIProvider,
-  'ollama': OllamaProvider,
-  'llamacpp': LlamaCppProvider,
-  'gemini': GeminiProvider,
-  'copilot': CopilotProvider,
+  'xai': async () => (await import('./plugins/agent/models/providers/xai.mjs')).XAIProvider,
+  'ollama': async () => (await import('./plugins/agent/models/providers/ollama.mjs')).OllamaProvider,
+  'llamacpp': async () => (await import('./plugins/agent/models/providers/llamacpp.mjs')).LlamaCppProvider,
+  'gemini': async () => (await import('./plugins/agent/models/providers/gemini.mjs')).GeminiProvider,
+  'copilot': async () => (await import('./plugins/agent/models/providers/copilot.mjs')).CopilotProvider,
 };
 
-function getProviderForModel(modelStr) {
+async function getProviderForModel(modelStr) {
   if (!modelStr || !modelStr.includes(':')) {
     // Default to xai if no prefix
-    return { provider: new XAIProvider(), modelName: modelStr || 'grok-3' };
+    const DefaultProvider = await providerRegistry.xai();
+    return { provider: new DefaultProvider(), modelName: modelStr || 'grok-3' };
   }
   
   const parts = modelStr.split(':');
   const providerName = parts[0].toLowerCase();
   const modelName = parts.slice(1).join(':').split('#')[0].trim();
   
-  const ProviderClass = providerRegistry[providerName];
-  if (!ProviderClass) {
+  const providerLoader = providerRegistry[providerName];
+  if (!providerLoader) {
     throw new Error(`Unknown provider: ${providerName}. Available: ${Object.keys(providerRegistry).join(', ')}`);
   }
+
+  const ProviderClass = await providerLoader();
   
   return { provider: new ProviderClass(), modelName };
 }
@@ -49,18 +49,347 @@ import { WebPlugin } from './plugins/web/index.mjs';
 import { AgentPlugin } from './plugins/agent/controllers/agent.mjs';
 import { HumanPlugin } from './plugins/human/index.mjs';
 import { ReplPlugin } from './plugins/repl/index.mjs';
+import { SubdPlugin } from './plugins/subd/index.mjs';
+
+const INTERNAL_FLAGS = new Set(['-a', '--sandbox-socket']);
+
+function sanitizeForwardArgs(rawArgs = []) {
+  const sanitized = [];
+  for (let i = 0; i < rawArgs.length; i++) {
+    const arg = rawArgs[i];
+    if (INTERNAL_FLAGS.has(arg)) {
+      if (arg === '--sandbox-socket') i++;
+      continue;
+    }
+    sanitized.push(arg);
+  }
+  return sanitized;
+}
+
+function spawnSubdOnHost(forwardArgs) {
+  const cliPath = path.resolve(import.meta.dirname, 'cli.mjs');
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cliPath, ...forwardArgs], {
+      cwd: process.cwd(),
+      env: process.env
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (error) => {
+      resolve({
+        ok: false,
+        error: error.message,
+        exitCode: 1,
+        stdout,
+        stderr
+      });
+    });
+
+    child.on('close', (code) => {
+      resolve({
+        ok: code === 0,
+        exitCode: code ?? 1,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
+function ensureSandboxImage() {
+  const exists = spawnSync(globals.containerRuntime, ['image', 'exists', globals.containerImage], {
+    stdio: 'ignore'
+  });
+
+  if (exists.status === 0) return;
+
+  console.error(`[sandbox] Image ${globals.containerImage} not found. Building...`);
+  const build = spawnSync(globals.containerRuntime, ['build', '-t', globals.containerImage, '.'], {
+    cwd: globals.PROJECT_ROOT,
+    encoding: 'utf8'
+  });
+
+  if (build.status !== 0) {
+    const stderr = (build.stderr || '').trim();
+    const stdout = (build.stdout || '').trim();
+    const details = stderr || stdout || 'unknown build error';
+    throw new Error(`Failed to build sandbox image ${globals.containerImage}: ${details}`);
+  }
+}
+
+async function executeToolOnHost(toolName, args, context = {}, toolOptions = null) {
+  const handler = globals.dslRegistry.get(toolName);
+  if (!handler) {
+    return { status: 'failure', error: `Tool ${toolName} not found` };
+  }
+
+  const previousToolOptions = globals.sessionToolOptions;
+  if (toolOptions && typeof toolOptions === 'object') {
+    globals.sessionToolOptions = new Map([[toolName, toolOptions]]);
+  }
+
+  try {
+    const result = await handler(args, context);
+    return result;
+  } catch (error) {
+    return { status: 'failure', error: error.message };
+  } finally {
+    globals.sessionToolOptions = previousToolOptions;
+  }
+}
+
+const providerInstanceCache = new Map();
+async function createChatCompletionOnHost(modelStr, messages, tools) {
+  let cached = providerInstanceCache.get(modelStr);
+  if (!cached) {
+    const { provider, modelName } = await getProviderForModel(modelStr);
+    await provider.init();
+    cached = { provider, modelName };
+    providerInstanceCache.set(modelStr, cached);
+  }
+
+  return await cached.provider.createChatCompletion({
+    model: cached.modelName,
+    messages,
+    tools
+  });
+}
+
+async function startSandboxSocketServer(socketPath) {
+  if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
+
+  const server = net.createServer((socket) => {
+    let buffer = '';
+
+    socket.on('data', async (data) => {
+      buffer += data.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        let request;
+        try {
+          request = JSON.parse(line);
+        } catch {
+          continue;
+        }
+
+        try {
+          if (request?.type === 'spawn_subd') {
+            const forwardArgs = sanitizeForwardArgs(Array.isArray(request.args) ? request.args.map(String) : []);
+            const result = await spawnSubdOnHost(forwardArgs);
+            socket.write(JSON.stringify({ id: request.id, ...result }) + '\n');
+          } else if (request?.type === 'resolve_template') {
+            const resolvedPath = resolveTemplatePath(request.templatePath);
+            if (!resolvedPath) {
+              socket.write(JSON.stringify({
+                id: request.id,
+                ok: false,
+                error: `Template not found: ${request.templatePath}`
+              }) + '\n');
+            } else {
+              const content = fs.readFileSync(resolvedPath, 'utf8');
+              socket.write(JSON.stringify({ id: request.id, ok: true, resolvedPath, content }) + '\n');
+            }
+          } else if (request?.type === 'ai_completion') {
+            const response = await createChatCompletionOnHost(request.modelStr, request.messages || [], request.tools);
+            socket.write(JSON.stringify({ id: request.id, ok: true, response }) + '\n');
+          } else if (request?.type === 'tool_call') {
+            const result = await executeToolOnHost(
+              request.toolName,
+              request.args || {},
+              request.context || {},
+              request.toolOptions || null
+            );
+            socket.write(JSON.stringify({ id: request.id, ok: true, result }) + '\n');
+          } else {
+            socket.write(JSON.stringify({
+              id: request?.id,
+              ok: false,
+              error: `Unsupported request type: ${request?.type || 'unknown'}`
+            }) + '\n');
+          }
+        } catch (error) {
+          socket.write(JSON.stringify({
+            id: request?.id,
+            ok: false,
+            error: error.message
+          }) + '\n');
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => {
+      server.removeListener('error', reject);
+      try { fs.chmodSync(socketPath, 0o777); } catch {}
+      resolve();
+    });
+  });
+
+  return server;
+}
+
+async function requestSpawnSubdFromHost(socketPath, forwardArgs) {
+  if (!socketPath) {
+    throw new Error('Sandbox socket path is not configured');
+  }
+
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  return await new Promise((resolve, reject) => {
+    const socket = net.createConnection({ path: socketPath });
+    let buffer = '';
+
+    socket.on('connect', () => {
+      const request = {
+        id,
+        type: 'spawn_subd',
+        args: sanitizeForwardArgs(forwardArgs)
+      };
+      socket.write(JSON.stringify(request) + '\n');
+    });
+
+    socket.on('data', (data) => {
+      buffer += data.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const message = JSON.parse(line);
+          if (message.id === id) {
+            socket.end();
+            resolve(message);
+            return;
+          }
+        } catch {
+          // Ignore malformed messages
+        }
+      }
+    });
+
+    socket.on('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
+async function sendSocketRequestToHost(socketPath, payload) {
+  if (!socketPath) {
+    throw new Error('Sandbox socket path is not configured');
+  }
+
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  return await new Promise((resolve, reject) => {
+    const socket = net.createConnection({ path: socketPath });
+    let buffer = '';
+
+    socket.on('connect', () => {
+      socket.write(JSON.stringify({ id, ...payload }) + '\n');
+    });
+
+    socket.on('data', (data) => {
+      buffer += data.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const message = JSON.parse(line);
+          if (message.id === id) {
+            socket.end();
+            resolve(message);
+            return;
+          }
+        } catch {
+          // Ignore malformed messages
+        }
+      }
+    });
+
+    socket.on('error', (err) => reject(err));
+  });
+}
+
+async function requestAICompletionFromHost(socketPath, payload) {
+  const response = await sendSocketRequestToHost(socketPath, {
+    type: 'ai_completion',
+    ...payload
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Host AI completion request failed');
+  }
+
+  return response.response;
+}
+
+async function requestTemplateFromHost(socketPath, templatePath) {
+  const response = await sendSocketRequestToHost(socketPath, {
+    type: 'resolve_template',
+    templatePath
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || `Template not found: ${templatePath}`);
+  }
+
+  return response;
+}
+
+async function requestToolCallFromHost(socketPath, payload) {
+  const response = await sendSocketRequestToHost(socketPath, {
+    type: 'tool_call',
+    ...payload
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Host tool call request failed');
+  }
+
+  return response.result;
+}
 
 // Handle subcommands
 const args = process.argv.slice(2);
 if (args[0] === 'clean') {
   const sessionsDir = path.resolve(import.meta.dirname, 'agent/sessions');
+  const socketsDir = path.resolve(import.meta.dirname, 'agent/sockets');
   const files = fs.existsSync(sessionsDir) 
     ? fs.readdirSync(sessionsDir).filter(f => f.endsWith('.yml'))
     : [];
   for (const file of files) {
     fs.unlinkSync(path.join(sessionsDir, file));
   }
-  console.log(`Removed ${files.length} session file(s).`);
+
+  let removedSocketEntries = 0;
+  if (fs.existsSync(socketsDir)) {
+    const socketEntries = fs.readdirSync(socketsDir);
+    removedSocketEntries = socketEntries.length;
+    for (const entry of socketEntries) {
+      fs.rmSync(path.join(socketsDir, entry), { recursive: true, force: true });
+    }
+  }
+
+  console.log(`Removed ${files.length} session file(s) and ${removedSocketEntries} socket entr${removedSocketEntries === 1 ? 'y' : 'ies'}.`);
   process.exit(0);
 }
 
@@ -73,6 +402,9 @@ let strict = false;
 let jsonlMode = false;
 let turnLimit = null;
 let readStdinFlag = false;
+let sandboxMode = false;
+let agentMode = false;
+let sandboxSocketArg = null;
 let promptParts = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -92,10 +424,27 @@ for (let i = 0; i < args.length; i++) {
     turnLimit = parseInt(args[++i], 10);
   } else if (args[i] === '-i') {
     readStdinFlag = true;
+  } else if (args[i] === '-s') {
+    sandboxMode = true;
+  } else if (args[i] === '-a') {
+    agentMode = true;
+  } else if (args[i] === '--sandbox-socket') {
+    sandboxSocketArg = args[++i];
   } else {
     promptParts.push(args[i]);
   }
 }
+
+const sandboxSocketPath = sandboxSocketArg || process.env.SUBD_SANDBOX_SOCKET || null;
+globals.subdContext = {
+  sandboxMode,
+  agentMode,
+  sandboxSocketPath,
+  requestSpawnSubdFromHost: (forwardArgs) => requestSpawnSubdFromHost(sandboxSocketPath, forwardArgs),
+  requestTemplateFromHost: (requestedTemplatePath) => requestTemplateFromHost(sandboxSocketPath, requestedTemplatePath),
+  requestAICompletionFromHost: (payload) => requestAICompletionFromHost(sandboxSocketPath, payload),
+  requestToolCallFromHost: (payload) => requestToolCallFromHost(sandboxSocketPath, payload)
+};
 
 // Helper for templates to read stdin (only if -i flag was passed)
 let stdinCache = null;
@@ -168,8 +517,73 @@ function logAssistant(text) {
 const userPrompt = promptParts.join(' ');
 
 if (!templatePath || !userPrompt) {
-  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] <prompt...>');
+  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] [-s] <prompt...>');
   process.exit(1);
+}
+
+if (sandboxMode && !agentMode) {
+  const runId = `sandbox-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const hostSocketDir = path.join(globals.PROJECT_ROOT, 'agent', 'sockets', runId);
+  fs.mkdirSync(hostSocketDir, { recursive: true });
+  try { fs.chmodSync(hostSocketDir, 0o777); } catch {}
+  const socketPath = path.join(hostSocketDir, 'bridge.sock');
+  const socketMountDir = '/subd-socket';
+  const socketInContainer = `${socketMountDir}/bridge.sock`;
+  let socketServer = null;
+
+  try {
+    ensureSandboxImage();
+
+    // Initialize tool registry on host so socket-routed tool calls can execute here.
+    globals.config.unattended = true;
+    new CorePlugin();
+    new FsPlugin();
+    new ShellPlugin();
+    new WebPlugin();
+    new AgentPlugin();
+    new HumanPlugin();
+    new SubdPlugin();
+
+    socketServer = await startSandboxSocketServer(socketPath);
+
+    const forwardedArgs = sanitizeForwardArgs(args);
+    const containerArgs = [
+      'run', '--rm', '--init',
+      '--name', `subd-${runId}`,
+      '--label', `subd.sandbox.run=${runId}`,
+      '-v', `${hostSocketDir}:${socketMountDir}`,
+      '-e', `SUBD_SANDBOX_SOCKET=${socketInContainer}`,
+      globals.containerImage,
+      'subd',
+      ...forwardedArgs,
+      '-a',
+      '--sandbox-socket', socketInContainer
+    ];
+
+    const child = spawn(globals.containerRuntime, containerArgs, {
+      stdio: 'inherit'
+    });
+
+    const exitCode = await new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', (code) => resolve(code ?? 1));
+    });
+
+    process.exit(exitCode);
+  } catch (e) {
+    console.error(`Sandbox launch failed: ${e.message}`);
+    process.exit(1);
+  } finally {
+    if (socketServer) {
+      try { socketServer.close(); } catch {}
+    }
+    if (fs.existsSync(socketPath)) {
+      try { fs.unlinkSync(socketPath); } catch {}
+    }
+    if (fs.existsSync(hostSocketDir)) {
+      try { fs.rmSync(hostSocketDir, { recursive: true, force: true }); } catch {}
+    }
+  }
 }
 
 // Resolve template path
@@ -199,15 +613,30 @@ function resolveTemplatePath(p) {
   return null;
 }
 
-const fullTemplatePath = resolveTemplatePath(templatePath);
+let fullTemplatePath = null;
+let templateContent = null;
 
-if (!fullTemplatePath) {
-  console.error(`Template not found: ${templatePath}`);
-  process.exit(1);
+if (agentMode) {
+  try {
+    const resolved = await globals.subdContext.requestTemplateFromHost(templatePath);
+    fullTemplatePath = resolved.resolvedPath || templatePath;
+    templateContent = resolved.content;
+  } catch (e) {
+    console.error(e.message || `Template not found: ${templatePath}`);
+    process.exit(1);
+  }
+} else {
+  fullTemplatePath = resolveTemplatePath(templatePath);
+
+  if (!fullTemplatePath) {
+    console.error(`Template not found: ${templatePath}`);
+    process.exit(1);
+  }
+
+  templateContent = fs.readFileSync(fullTemplatePath, 'utf8');
 }
 
 // Load Template
-const templateContent = fs.readFileSync(fullTemplatePath, 'utf8');
 const template = yaml.load(templateContent);
 
 // Load Data
@@ -266,6 +695,7 @@ new ShellPlugin();
 new WebPlugin();
 new AgentPlugin();
 new HumanPlugin();
+new SubdPlugin();
 
 // Create Session
 const sessionId = SessionModel.generateId();
@@ -285,8 +715,14 @@ if (jsonlMode) {
 
 // Initialize Provider based on model string from template
 const modelStr = template.metadata?.model || 'xai:grok-3';
-const { provider, modelName } = getProviderForModel(modelStr);
-await provider.init();
+let provider = null;
+let modelName = null;
+if (!agentMode) {
+  const resolved = await getProviderForModel(modelStr);
+  provider = resolved.provider;
+  modelName = resolved.modelName;
+  await provider.init();
+}
 
 // Tool Call Loop
 async function getChatMessages(sessionId) {
@@ -377,7 +813,7 @@ async function executeSingleTool(sessionId, toolCall) {
     Utils.logInfo(`Tool Call: ${toolName}(${argsStr})`);
   }
   const handler = globals.dslRegistry.get(toolName);
-  if (!handler) return { role: 'tool', tool_call_id: toolCall.id, name: toolName, content: `Error: Tool ${toolName} not found`, timestamp: new Date().toISOString() };
+  if (!globals.subdContext?.agentMode && !handler) return { role: 'tool', tool_call_id: toolCall.id, name: toolName, content: `Error: Tool ${toolName} not found`, timestamp: new Date().toISOString() };
 
   const toolStartTime = Date.now();
   try {
@@ -441,11 +877,17 @@ async function runLoop() {
     turnCount++;
     
     const apiStartTime = Date.now();
-    const response = await provider.createChatCompletion({
-      model: modelName,
-      messages,
-      tools
-    });
+    const response = globals.subdContext?.agentMode
+      ? await globals.subdContext.requestAICompletionFromHost({
+          modelStr,
+          messages,
+          tools
+        })
+      : await provider.createChatCompletion({
+          model: modelName,
+          messages,
+          tools
+        });
     const apiEndTime = Date.now();
     const apiDuration = (apiEndTime - apiStartTime) / 1000;
     

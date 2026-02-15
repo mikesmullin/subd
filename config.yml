@@ -14,7 +14,7 @@ log:
   filePath: ./logs/daemon.log
 container:
   runtime: podman
-  image: daemon-v3-image
+  image: subd:latest
 dashboard:
   widgets:
     - name: agent.sessions

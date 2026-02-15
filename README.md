@@ -12,7 +12,7 @@ bun link
 ## Usage
 
 ```bash
-subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] <prompt...>
+subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] [-s] <prompt...>
 ```
 
 ### Options
@@ -23,7 +23,19 @@ subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] <prom
 - `-v`: (Optional) Verbose mode. Prints performance stats, thoughts, and tool results to stderr.
 - `-j`: (Optional) JSONL output mode. Every line logged is wrapped in a JSON object for machine parsing.
 - `-l`: (Optional) Limit the number of AI turns before exiting. Useful for single-shot tool execution.
+- `-s`: (Optional) Sandbox mode. Runs the agent in a Podman container and enables host-bridge socket routing for sandbox-aware tools.
+- `-a`: (Internal) Agent/container mode. Set automatically for the process running inside a sandbox container; not intended for normal manual use.
 - `prompt...`: (Required) The initial user prompt.
+
+### Sandbox Image (Podman)
+
+Build the sandbox image once (or after code/dependency changes):
+
+```bash
+podman build -t subd:latest .
+```
+
+`-s` mode uses this image via `podman run`.
 
 ### Example: Automated Processing
 

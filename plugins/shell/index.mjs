@@ -5,7 +5,6 @@ import { ApprovalModel } from '../human/models/approval.mjs';
 import { bridge, ToolExecutionStatus } from '../agent/controllers/host-container-bridge.mjs';
 import { exec } from 'child_process';
 import util from 'util';
-import { ptyManager } from './pty-manager.mjs';
 import { checkCommand } from './terminal-allowlist.mjs';
 
 const execAsync = util.promisify(exec);
@@ -13,7 +12,20 @@ const execAsync = util.promisify(exec);
 export class ShellPlugin {
   constructor() {
     globals.pluginsRegistry.set('shell', this);
+    this.ptyManager = null;
+    this.ptyManagerPromise = null;
     this.registerTools();
+  }
+
+  async getPtyManager() {
+    if (this.ptyManager) return this.ptyManager;
+    if (!this.ptyManagerPromise) {
+      this.ptyManagerPromise = import('./pty-manager.mjs').then((mod) => {
+        this.ptyManager = mod.ptyManager;
+        return this.ptyManager;
+      });
+    }
+    return await this.ptyManagerPromise;
   }
 
   /**
@@ -421,6 +433,7 @@ export class ShellPlugin {
       }
 
       const sessionId = context.sessionId || 'default'; 
+        const ptyManager = await this.getPtyManager();
       const session = ptyManager.createSession(sessionId, { id: ptyId });
       Utils.logInfo(`Created PTY session: ${session.id}`);
       return {
@@ -429,7 +442,8 @@ export class ShellPlugin {
       };
   }
 
-  _writeToPtty(sessionId, ptyId, text) {
+      async _writeToPtty(sessionId, ptyId, text) {
+        const ptyManager = await this.getPtyManager();
       sessionId = sessionId || 'default';
       const session = ptyManager.getSession(sessionId, ptyId);
       if (session) {
@@ -473,7 +487,7 @@ export class ShellPlugin {
           // Auto-approved (allowlist or no session context)
           if (check.approved || !context.sessionId) {
             Utils.logInfo(`Command auto-approved: ${check.reason || 'no session context'}`);
-            return this._writeToPtty(context.sessionId, ptyId, text);
+            return await this._writeToPtty(context.sessionId, ptyId, text);
           }
           
           // Check for unattended mode
@@ -502,7 +516,7 @@ export class ShellPlugin {
                   error: `Command rejected. Human guidance: ${existing.response}`
                 };
               }
-              return this._writeToPtty(context.sessionId, ptyId, text);
+              return await this._writeToPtty(context.sessionId, ptyId, text);
             }
           }
           
@@ -531,7 +545,7 @@ export class ShellPlugin {
           }
           
           if (externalData.choice === 'APPROVE') {
-            return this._writeToPtty(context.sessionId, state.ptyId, state.text);
+            return await this._writeToPtty(context.sessionId, state.ptyId, state.text);
           } else {
             return {
               status: ToolExecutionStatus.FAILURE,
@@ -556,6 +570,7 @@ export class ShellPlugin {
       }
 
       const sessionId = context.sessionId || 'default';
+      const ptyManager = await this.getPtyManager();
       const session = ptyManager.getSession(sessionId, ptyId);
       if (session) {
           const result = session.read({ sinceLastRead: true });
@@ -576,6 +591,7 @@ export class ShellPlugin {
 
   async listPttySessions(args) {
       // List all sessions from all agents
+      const ptyManager = await this.getPtyManager();
       let sessions = [];
       for (const [key, session] of ptyManager.sessions.entries()) {
           sessions.push(session.getInfo());
@@ -616,6 +632,7 @@ export class ShellPlugin {
       }
 
       const sessionId = context.sessionId || 'default';
+        const ptyManager = await this.getPtyManager();
       ptyManager.closeSession(sessionId, ptyId);
       return { status: ToolExecutionStatus.SUCCESS, result: `Closed PTY ${ptyId}` };
   }
@@ -630,6 +647,7 @@ export class ShellPlugin {
 
       // Use session context if provided, otherwise default to 'default'
       const sessionId = context.sessionId || 'default';
+      const ptyManager = await this.getPtyManager();
       const session = ptyManager.getSession(sessionId, ptyId);
       
       if (!session) {

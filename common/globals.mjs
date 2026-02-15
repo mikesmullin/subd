@@ -45,7 +45,7 @@ class Globals {
     this.toolCallStates = new Map();     // Map<toolCallId, { status, state, context, externalData }>
     // Container runtime config (defaults, overridden by loadConfig)
     this.containerRuntime = 'podman';
-    this.containerImage = 'daemon-v3-image';
+    this.containerImage = 'subd:latest';
     this.pasteDetectionThreshold = 150; // ms, configurable via config.yml pasteDetectionThreshold
     
     this._loadEnv();
