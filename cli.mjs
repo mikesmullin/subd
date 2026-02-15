@@ -5,7 +5,8 @@ import ejs from 'ejs';
 import yaml from 'js-yaml';
 import os from 'os';
 import net from 'net';
-import { spawn, spawnSync } from 'child_process';
+import crypto from 'crypto';
+import { spawn } from 'child_process';
 import { globals } from './common/globals.mjs';
 import { Utils } from './common/utils.mjs';
 import { SessionModel, SessionState } from './plugins/agent/models/session.mjs';
@@ -51,14 +52,14 @@ import { HumanPlugin } from './plugins/human/index.mjs';
 import { ReplPlugin } from './plugins/repl/index.mjs';
 import { SubdPlugin } from './plugins/subd/index.mjs';
 
-const INTERNAL_FLAGS = new Set(['-a', '--sandbox-socket']);
+const INTERNAL_FLAGS = new Set(['-a', '--sandbox-host', '--sandbox-port', '--sandbox-token']);
 
 function sanitizeForwardArgs(rawArgs = []) {
   const sanitized = [];
   for (let i = 0; i < rawArgs.length; i++) {
     const arg = rawArgs[i];
     if (INTERNAL_FLAGS.has(arg)) {
-      if (arg === '--sandbox-socket') i++;
+      if (arg === '--sandbox-host' || arg === '--sandbox-port' || arg === '--sandbox-token') i++;
       continue;
     }
     sanitized.push(arg);
@@ -106,27 +107,6 @@ function spawnSubdOnHost(forwardArgs) {
   });
 }
 
-function ensureSandboxImage() {
-  const exists = spawnSync(globals.containerRuntime, ['image', 'exists', globals.containerImage], {
-    stdio: 'ignore'
-  });
-
-  if (exists.status === 0) return;
-
-  console.error(`[sandbox] Image ${globals.containerImage} not found. Building...`);
-  const build = spawnSync(globals.containerRuntime, ['build', '-t', globals.containerImage, '.'], {
-    cwd: globals.PROJECT_ROOT,
-    encoding: 'utf8'
-  });
-
-  if (build.status !== 0) {
-    const stderr = (build.stderr || '').trim();
-    const stdout = (build.stdout || '').trim();
-    const details = stderr || stdout || 'unknown build error';
-    throw new Error(`Failed to build sandbox image ${globals.containerImage}: ${details}`);
-  }
-}
-
 async function executeToolOnHost(toolName, args, context = {}, toolOptions = null) {
   const handler = globals.dslRegistry.get(toolName);
   if (!handler) {
@@ -165,9 +145,7 @@ async function createChatCompletionOnHost(modelStr, messages, tools) {
   });
 }
 
-async function startSandboxSocketServer(socketPath) {
-  if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
-
+async function startSandboxTcpServer(authToken) {
   const server = net.createServer((socket) => {
     let buffer = '';
 
@@ -183,6 +161,15 @@ async function startSandboxSocketServer(socketPath) {
         try {
           request = JSON.parse(line);
         } catch {
+          continue;
+        }
+
+        if (request?.token !== authToken) {
+          socket.write(JSON.stringify({
+            id: request?.id,
+            ok: false,
+            error: 'Unauthorized sandbox bridge request'
+          }) + '\n');
           continue;
         }
 
@@ -234,30 +221,36 @@ async function startSandboxSocketServer(socketPath) {
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(socketPath, () => {
+    server.listen(0, '0.0.0.0', () => {
       server.removeListener('error', reject);
-      try { fs.chmodSync(socketPath, 0o777); } catch {}
       resolve();
     });
   });
 
-  return server;
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : null;
+  if (!port) {
+    throw new Error('Failed to allocate sandbox TCP port');
+  }
+
+  return { server, port };
 }
 
-async function requestSpawnSubdFromHost(socketPath, forwardArgs) {
-  if (!socketPath) {
-    throw new Error('Sandbox socket path is not configured');
+async function requestSpawnSubdFromHost(bridgeConfig, forwardArgs) {
+  if (!bridgeConfig?.host || !bridgeConfig?.port || !bridgeConfig?.token) {
+    throw new Error('Sandbox bridge is not configured');
   }
 
   const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   return await new Promise((resolve, reject) => {
-    const socket = net.createConnection({ path: socketPath });
+    const socket = net.createConnection({ host: bridgeConfig.host, port: bridgeConfig.port });
     let buffer = '';
 
     socket.on('connect', () => {
       const request = {
         id,
+        token: bridgeConfig.token,
         type: 'spawn_subd',
         args: sanitizeForwardArgs(forwardArgs)
       };
@@ -290,19 +283,19 @@ async function requestSpawnSubdFromHost(socketPath, forwardArgs) {
   });
 }
 
-async function sendSocketRequestToHost(socketPath, payload) {
-  if (!socketPath) {
-    throw new Error('Sandbox socket path is not configured');
+async function sendSocketRequestToHost(bridgeConfig, payload) {
+  if (!bridgeConfig?.host || !bridgeConfig?.port || !bridgeConfig?.token) {
+    throw new Error('Sandbox bridge is not configured');
   }
 
   const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   return await new Promise((resolve, reject) => {
-    const socket = net.createConnection({ path: socketPath });
+    const socket = net.createConnection({ host: bridgeConfig.host, port: bridgeConfig.port });
     let buffer = '';
 
     socket.on('connect', () => {
-      socket.write(JSON.stringify({ id, ...payload }) + '\n');
+      socket.write(JSON.stringify({ id, token: bridgeConfig.token, ...payload }) + '\n');
     });
 
     socket.on('data', (data) => {
@@ -329,8 +322,8 @@ async function sendSocketRequestToHost(socketPath, payload) {
   });
 }
 
-async function requestAICompletionFromHost(socketPath, payload) {
-  const response = await sendSocketRequestToHost(socketPath, {
+async function requestAICompletionFromHost(bridgeConfig, payload) {
+  const response = await sendSocketRequestToHost(bridgeConfig, {
     type: 'ai_completion',
     ...payload
   });
@@ -342,8 +335,8 @@ async function requestAICompletionFromHost(socketPath, payload) {
   return response.response;
 }
 
-async function requestTemplateFromHost(socketPath, templatePath) {
-  const response = await sendSocketRequestToHost(socketPath, {
+async function requestTemplateFromHost(bridgeConfig, templatePath) {
+  const response = await sendSocketRequestToHost(bridgeConfig, {
     type: 'resolve_template',
     templatePath
   });
@@ -355,8 +348,8 @@ async function requestTemplateFromHost(socketPath, templatePath) {
   return response;
 }
 
-async function requestToolCallFromHost(socketPath, payload) {
-  const response = await sendSocketRequestToHost(socketPath, {
+async function requestToolCallFromHost(bridgeConfig, payload) {
+  const response = await sendSocketRequestToHost(bridgeConfig, {
     type: 'tool_call',
     ...payload
   });
@@ -372,7 +365,6 @@ async function requestToolCallFromHost(socketPath, payload) {
 const args = process.argv.slice(2);
 if (args[0] === 'clean') {
   const sessionsDir = path.resolve(import.meta.dirname, 'agent/sessions');
-  const socketsDir = path.resolve(import.meta.dirname, 'agent/sockets');
   const files = fs.existsSync(sessionsDir) 
     ? fs.readdirSync(sessionsDir).filter(f => f.endsWith('.yml'))
     : [];
@@ -380,16 +372,7 @@ if (args[0] === 'clean') {
     fs.unlinkSync(path.join(sessionsDir, file));
   }
 
-  let removedSocketEntries = 0;
-  if (fs.existsSync(socketsDir)) {
-    const socketEntries = fs.readdirSync(socketsDir);
-    removedSocketEntries = socketEntries.length;
-    for (const entry of socketEntries) {
-      fs.rmSync(path.join(socketsDir, entry), { recursive: true, force: true });
-    }
-  }
-
-  console.log(`Removed ${files.length} session file(s) and ${removedSocketEntries} socket entr${removedSocketEntries === 1 ? 'y' : 'ies'}.`);
+  console.log(`Removed ${files.length} session file(s).`);
   process.exit(0);
 }
 
@@ -404,7 +387,9 @@ let turnLimit = null;
 let readStdinFlag = false;
 let sandboxMode = false;
 let agentMode = false;
-let sandboxSocketArg = null;
+let sandboxHostArg = null;
+let sandboxPortArg = null;
+let sandboxTokenArg = null;
 let promptParts = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -428,22 +413,31 @@ for (let i = 0; i < args.length; i++) {
     sandboxMode = true;
   } else if (args[i] === '-a') {
     agentMode = true;
-  } else if (args[i] === '--sandbox-socket') {
-    sandboxSocketArg = args[++i];
+  } else if (args[i] === '--sandbox-host') {
+    sandboxHostArg = args[++i];
+  } else if (args[i] === '--sandbox-port') {
+    sandboxPortArg = args[++i];
+  } else if (args[i] === '--sandbox-token') {
+    sandboxTokenArg = args[++i];
   } else {
     promptParts.push(args[i]);
   }
 }
 
-const sandboxSocketPath = sandboxSocketArg || process.env.SUBD_SANDBOX_SOCKET || null;
+const sandboxBridgeConfig = {
+  host: sandboxHostArg || process.env.SUBD_SANDBOX_HOST || null,
+  port: sandboxPortArg ? parseInt(sandboxPortArg, 10) : (process.env.SUBD_SANDBOX_PORT ? parseInt(process.env.SUBD_SANDBOX_PORT, 10) : null),
+  token: sandboxTokenArg || process.env.SUBD_SANDBOX_TOKEN || null
+};
+
 globals.subdContext = {
   sandboxMode,
   agentMode,
-  sandboxSocketPath,
-  requestSpawnSubdFromHost: (forwardArgs) => requestSpawnSubdFromHost(sandboxSocketPath, forwardArgs),
-  requestTemplateFromHost: (requestedTemplatePath) => requestTemplateFromHost(sandboxSocketPath, requestedTemplatePath),
-  requestAICompletionFromHost: (payload) => requestAICompletionFromHost(sandboxSocketPath, payload),
-  requestToolCallFromHost: (payload) => requestToolCallFromHost(sandboxSocketPath, payload)
+  sandboxBridgeConfig,
+  requestSpawnSubdFromHost: (forwardArgs) => requestSpawnSubdFromHost(sandboxBridgeConfig, forwardArgs),
+  requestTemplateFromHost: (requestedTemplatePath) => requestTemplateFromHost(sandboxBridgeConfig, requestedTemplatePath),
+  requestAICompletionFromHost: (payload) => requestAICompletionFromHost(sandboxBridgeConfig, payload),
+  requestToolCallFromHost: (payload) => requestToolCallFromHost(sandboxBridgeConfig, payload)
 };
 
 // Helper for templates to read stdin (only if -i flag was passed)
@@ -523,17 +517,12 @@ if (!templatePath || !userPrompt) {
 
 if (sandboxMode && !agentMode) {
   const runId = `sandbox-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  const hostSocketDir = path.join(globals.PROJECT_ROOT, 'agent', 'sockets', runId);
-  fs.mkdirSync(hostSocketDir, { recursive: true });
-  try { fs.chmodSync(hostSocketDir, 0o777); } catch {}
-  const socketPath = path.join(hostSocketDir, 'bridge.sock');
-  const socketMountDir = '/subd-socket';
-  const socketInContainer = `${socketMountDir}/bridge.sock`;
-  let socketServer = null;
+  const sandboxToken = crypto.randomBytes(32).toString('hex');
+  const sandboxHost = process.env.SUBD_SANDBOX_HOST_FOR_CONTAINER || 'host.containers.internal';
+  let sandboxServer = null;
+  let sandboxPort = null;
 
   try {
-    ensureSandboxImage();
-
     // Initialize tool registry on host so socket-routed tool calls can execute here.
     globals.config.unattended = true;
     new CorePlugin();
@@ -544,20 +533,25 @@ if (sandboxMode && !agentMode) {
     new HumanPlugin();
     new SubdPlugin();
 
-    socketServer = await startSandboxSocketServer(socketPath);
+    const started = await startSandboxTcpServer(sandboxToken);
+    sandboxServer = started.server;
+    sandboxPort = started.port;
 
     const forwardedArgs = sanitizeForwardArgs(args);
     const containerArgs = [
       'run', '--rm', '--init',
       '--name', `subd-${runId}`,
       '--label', `subd.sandbox.run=${runId}`,
-      '-v', `${hostSocketDir}:${socketMountDir}`,
-      '-e', `SUBD_SANDBOX_SOCKET=${socketInContainer}`,
+      '-e', `SUBD_SANDBOX_HOST=${sandboxHost}`,
+      '-e', `SUBD_SANDBOX_PORT=${sandboxPort}`,
+      '-e', `SUBD_SANDBOX_TOKEN=${sandboxToken}`,
       globals.containerImage,
       'subd',
       ...forwardedArgs,
       '-a',
-      '--sandbox-socket', socketInContainer
+      '--sandbox-host', sandboxHost,
+      '--sandbox-port', `${sandboxPort}`,
+      '--sandbox-token', sandboxToken
     ];
 
     const child = spawn(globals.containerRuntime, containerArgs, {
@@ -574,14 +568,8 @@ if (sandboxMode && !agentMode) {
     console.error(`Sandbox launch failed: ${e.message}`);
     process.exit(1);
   } finally {
-    if (socketServer) {
-      try { socketServer.close(); } catch {}
-    }
-    if (fs.existsSync(socketPath)) {
-      try { fs.unlinkSync(socketPath); } catch {}
-    }
-    if (fs.existsSync(hostSocketDir)) {
-      try { fs.rmSync(hostSocketDir, { recursive: true, force: true }); } catch {}
+    if (sandboxServer) {
+      try { sandboxServer.close(); } catch {}
     }
   }
 }
