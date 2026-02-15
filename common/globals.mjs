@@ -32,7 +32,6 @@ class Globals {
     // Track active tool calls by session ID for cancellation: Map<sessionId, AbortController>
     this.activeToolCalls = new Map();
     // Plugin interface registries
-    this.widgetRegistry = new Map();     // Map<pluginName.widgetName, { plugin, render: () => string }>
     this.subcommandRegistry = new Map(); // Map<subcommandPath, { plugin, handler }>
     this.humanOnlyTools = new Set();     // Set of tool names that are human-only
     this.humanQuestions = new Map();     // Map<id, { question, status, answer, sessionId }>

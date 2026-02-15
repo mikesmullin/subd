@@ -18,7 +18,6 @@ const providerRegistry = {
   'xai': async () => (await import('./plugins/agent/models/providers/xai.mjs')).XAIProvider,
   'ollama': async () => (await import('./plugins/agent/models/providers/ollama.mjs')).OllamaProvider,
   'llamacpp': async () => (await import('./plugins/agent/models/providers/llamacpp.mjs')).LlamaCppProvider,
-  'gemini': async () => (await import('./plugins/agent/models/providers/gemini.mjs')).GeminiProvider,
   'copilot': async () => (await import('./plugins/agent/models/providers/copilot.mjs')).CopilotProvider,
 };
 
@@ -47,10 +46,7 @@ async function getProviderForModel(modelStr) {
 import { CorePlugin } from './plugins/core/index.mjs';
 import { FsPlugin } from './plugins/fs/index.mjs';
 import { ShellPlugin } from './plugins/shell/index.mjs';
-import { WebPlugin } from './plugins/web/index.mjs';
 import { AgentPlugin } from './plugins/agent/controllers/agent.mjs';
-import { HumanPlugin } from './plugins/human/index.mjs';
-import { ReplPlugin } from './plugins/repl/index.mjs';
 import { SubdPlugin } from './plugins/subd/index.mjs';
 
 const INTERNAL_FLAGS = new Set(['-a', '--sandbox-host', '--sandbox-port', '--sandbox-token']);
@@ -691,9 +687,7 @@ if (sandboxMode && !agentMode) {
     new CorePlugin();
     new FsPlugin();
     new ShellPlugin();
-    new WebPlugin();
     new AgentPlugin();
-    new HumanPlugin();
     new SubdPlugin();
 
     const started = await startSandboxTcpServer(sandboxToken, {
@@ -845,9 +839,7 @@ globals.config.unattended = true;
 new CorePlugin();
 new FsPlugin();
 new ShellPlugin();
-new WebPlugin();
 new AgentPlugin();
-new HumanPlugin();
 new SubdPlugin();
 
 async function persistSession(sessionId, sessionData) {

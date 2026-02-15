@@ -101,7 +101,7 @@ export class SubdPlugin {
       const forwardArgs = this.buildArgs(args);
       const context = globals.subdContext || {};
 
-      if (context.agentMode && context.sandboxSocketPath && typeof context.requestSpawnSubdFromHost === 'function') {
+      if (context.agentMode && typeof context.requestSpawnSubdFromHost === 'function') {
         const spawnArgs = [...forwardArgs];
         if (!spawnArgs.includes('-s')) {
           spawnArgs.unshift('-s');

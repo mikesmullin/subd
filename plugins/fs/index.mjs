@@ -11,6 +11,43 @@ export class FsPlugin {
     this.registerTools();
   }
 
+  getWorkspaceRoot() {
+    return path.resolve(process.cwd());
+  }
+
+  isWithinWorkspace(targetPath) {
+    const workspaceRoot = this.getWorkspaceRoot();
+    const relative = path.relative(workspaceRoot, targetPath);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  }
+
+  resolveWorkspacePath(inputPath, options = {}) {
+    const rawPath = inputPath || '.';
+    const workspaceRoot = this.getWorkspaceRoot();
+    const resolved = path.resolve(workspaceRoot, rawPath);
+
+    if (this.isWithinWorkspace(resolved)) {
+      return resolved;
+    }
+
+    if (options.allowViaRealpath !== false) {
+      const existingTarget = fs.existsSync(resolved)
+        ? resolved
+        : (fs.existsSync(path.dirname(resolved)) ? path.dirname(resolved) : null);
+
+      if (existingTarget) {
+        try {
+          const realTarget = fs.realpathSync(existingTarget);
+          if (this.isWithinWorkspace(realTarget)) {
+            return resolved;
+          }
+        } catch {}
+      }
+    }
+
+    throw new Error(`Permission denied: Path is outside current working directory: ${rawPath}`);
+  }
+
   registerTools() {
     globals.dslRegistry.set('fs__file__view', this.viewFile.bind(this));
     globals.dslRegistry.set('fs__file__create', this.createFile.bind(this));
@@ -179,7 +216,12 @@ export class FsPlugin {
       }
       
       if (!filePath) return { status: ToolExecutionStatus.FAILURE, error: 'Usage: view_file <filePath>' };
-      const absPath = path.resolve(process.cwd(), filePath);
+      let absPath;
+      try {
+        absPath = this.resolveWorkspacePath(filePath);
+      } catch (error) {
+        return { status: ToolExecutionStatus.FAILURE, error: error.message };
+      }
       if (fs.existsSync(absPath)) {
           const content = fs.readFileSync(absPath, 'utf8');
           Utils.logInfo(`Content of ${filePath}:\n${content}`);
@@ -193,7 +235,12 @@ export class FsPlugin {
 
   async awaitFile(args) {
     const filePath = args.filePath;
-    const absPath = path.resolve(process.cwd(), filePath);
+    let absPath;
+    try {
+      absPath = this.resolveWorkspacePath(filePath);
+    } catch (error) {
+      return { status: ToolExecutionStatus.FAILURE, error: error.message };
+    }
     
     let initialStats = null;
     if (fs.existsSync(absPath)) {
@@ -229,7 +276,12 @@ export class FsPlugin {
       }
 
       if (!filePath) return { status: ToolExecutionStatus.FAILURE, error: 'Usage: create_file <filePath> <content>' };
-      const absPath = path.resolve(process.cwd(), filePath);
+      let absPath;
+      try {
+        absPath = this.resolveWorkspacePath(filePath);
+      } catch (error) {
+        return { status: ToolExecutionStatus.FAILURE, error: error.message };
+      }
       // Ensure dir exists
       const dir = path.dirname(absPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -246,7 +298,12 @@ export class FsPlugin {
           dirPath = args.path || '.';
       }
 
-      const absPath = path.resolve(process.cwd(), dirPath);
+      let absPath;
+      try {
+        absPath = this.resolveWorkspacePath(dirPath);
+      } catch (error) {
+        return { status: ToolExecutionStatus.FAILURE, error: error.message };
+      }
       if (fs.existsSync(absPath)) {
           const files = fs.readdirSync(absPath);
           const output = `Files in ${dirPath}:\n${files.join('\n')}`;
@@ -273,7 +330,12 @@ export class FsPlugin {
 
       if (!filePath || !oldString || newString === undefined) return { status: ToolExecutionStatus.FAILURE, error: 'Usage: edit_file <filePath> <oldString> <newString>' };
       
-      const absPath = path.resolve(process.cwd(), filePath);
+      let absPath;
+      try {
+        absPath = this.resolveWorkspacePath(filePath);
+      } catch (error) {
+        return { status: ToolExecutionStatus.FAILURE, error: error.message };
+      }
       if (fs.existsSync(absPath)) {
           const content = fs.readFileSync(absPath, 'utf8');
           
@@ -308,7 +370,12 @@ export class FsPlugin {
       }
 
       if (!dirPath) return { status: ToolExecutionStatus.FAILURE, error: 'Usage: create_directory <dirPath>' };
-      const absPath = path.resolve(process.cwd(), dirPath);
+      let absPath;
+      try {
+        absPath = this.resolveWorkspacePath(dirPath);
+      } catch (error) {
+        return { status: ToolExecutionStatus.FAILURE, error: error.message };
+      }
       fs.mkdirSync(absPath, { recursive: true });
       Utils.logInfo(`Created directory ${dirPath}`);
       return { status: ToolExecutionStatus.SUCCESS, result: `Created directory ${dirPath}` };
@@ -325,7 +392,12 @@ export class FsPlugin {
       }
 
       if (!query) return { status: ToolExecutionStatus.FAILURE, error: 'Usage: grep_search <query> [path]' };
-      const absPath = path.resolve(process.cwd(), searchPath);
+      let absPath;
+      try {
+        absPath = this.resolveWorkspacePath(searchPath);
+      } catch (error) {
+        return { status: ToolExecutionStatus.FAILURE, error: error.message };
+      }
       try {
           const result = execSync(`grep -rn "${query}" "${absPath}"`, { encoding: 'utf8' });
           Utils.logInfo(`Grep results:\n${result}`);
@@ -355,7 +427,12 @@ export class FsPlugin {
       }
 
       if (!filePath || !patchContent) return { status: ToolExecutionStatus.FAILURE, error: 'Usage: apply_patch <filePath> <patchContent>' };
-      const absPath = path.resolve(process.cwd(), filePath);
+      let absPath;
+      try {
+        absPath = this.resolveWorkspacePath(filePath);
+      } catch (error) {
+        return { status: ToolExecutionStatus.FAILURE, error: error.message };
+      }
       const result = this.applyPatch(absPath, patchContent);
       if (result.success) {
           Utils.logInfo(`Patched ${filePath}`);
@@ -441,13 +518,11 @@ export class FsPlugin {
       }
 
       if (!filePath) return { status: ToolExecutionStatus.FAILURE, error: 'Usage: delete_file <filePath>' };
-      const absPath = path.resolve(process.cwd(), filePath);
-      const cwd = process.cwd();
-
-      if (!absPath.startsWith(cwd)) {
-          const err = `Permission denied: Cannot delete file outside of current working directory: ${filePath}`;
-          Utils.logError(err);
-          return { status: ToolExecutionStatus.FAILURE, error: err };
+      let absPath;
+      try {
+        absPath = this.resolveWorkspacePath(filePath);
+      } catch (error) {
+        return { status: ToolExecutionStatus.FAILURE, error: error.message };
       }
 
       if (fs.existsSync(absPath)) {

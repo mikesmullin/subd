@@ -24,7 +24,6 @@ export class AgentPlugin {
     
     this.registerCommands();
     this.registerTools();
-    this.registerWidgets();
     globals.pluginsRegistry.set('agent', this);
     globals.eventBus.on('stopped', this.onShutdown.bind(this));
     globals.eventBus.on('started', this.recoverSessions.bind(this));
@@ -33,32 +32,6 @@ export class AgentPlugin {
   registerCommands() {
     // No top-level commands registered. 
     // All access is via tools or generic CLI resolution (e.g. "agent templates list" -> "agent.templates.list")
-  }
-
-  registerWidgets() {
-    // Widget: agent.sessions - Shows active sessions summary
-    globals.widgetRegistry.set('agent.sessions', {
-      plugin: 'agent',
-      render: async () => {
-        const sessions = SessionModel.list();
-        if (sessions.length === 0) {
-          return '┌─ Sessions ────────────────┐\n│ (no active sessions)     │\n└───────────────────────────┘';
-        }
-        
-        let output = '┌─ Sessions ────────────────┐\n';
-        for (const id of sessions.slice(0, 5)) {  // Show max 5
-          const session = SessionModel.load(id);
-          const state = session?.state || 'unknown';
-          const template = session?.template?.name || 'unknown';
-          output += `│ ${id}: ${template} [${state}]`.padEnd(28) + '│\n';
-        }
-        if (sessions.length > 5) {
-          output += `│ ... and ${sessions.length - 5} more`.padEnd(28) + '│\n';
-        }
-        output += '└───────────────────────────┘';
-        return output;
-      }
-    });
   }
 
   registerTools() {

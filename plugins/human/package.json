@@ -1,7 +1,0 @@
-{
-  "name": "daemon-plugin-human",
-  "type": "module",
-  "dependencies": {
-    "open": "^10.2.0"
-  }
-}

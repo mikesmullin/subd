@@ -1,8 +1,6 @@
 import { globals } from '../../../common/globals.mjs';
 import { Utils } from '../../../common/utils.mjs';
 import { SessionModel } from '../models/session.mjs';
-import { HumanPlugin } from '../../human/index.mjs';
-import { ApprovalModel } from '../../human/models/approval.mjs';
 import net from 'net';
 import fs from 'fs';
 import path from 'path';
@@ -359,49 +357,12 @@ class Bridge {
       return result;
     }
     
-    // We're on the host - create approval record and return immediately (non-blocking)
-    // Don't wait for human response - that will come via CLI later
-    Utils.logTrace(`[Bridge.handleApprovalRequest] On host, creating approval record`);
-    Utils.logInfo(`[APPROVAL NEEDED] ${description}`);
-    
-    try {
-      const id = (++globals.humanApprovalsCounter).toString();
-      Utils.logTrace(`[Bridge.handleApprovalRequest] Generated approval id=${id}`);
-      
-      Utils.logTrace(`[Bridge.handleApprovalRequest] Creating ApprovalModel with: id=${id}, sessionId=${sessionId}, toolCallId=${toolCallId}`);
-      ApprovalModel.create({
-        id,
-        sessionId,
-        type: approvalType,
-        description,
-        status: 'pending',
-        toolCallId,
-        timestamp: new Date().toISOString()
-      });
-      Utils.logTrace(`[Bridge.handleApprovalRequest] ApprovalModel.create completed`);
-      
-      // Ring bell if in REPL mode
-      if (globals.isRepl) {
-        Utils.logTrace(`[Bridge.handleApprovalRequest] In REPL mode, ringing bell`);
-        process.stdout.write('\x07');
-      }
-      
-      // Return success immediately - approval will be processed asynchronously
-      const result = { 
-        success: true, 
-        message: `Approval request created (ID: ${id})` 
-      };
-      Utils.logTrace(`[Bridge.handleApprovalRequest] Returning success: ${JSON.stringify(result)}`);
-      return result;
-    } catch (e) {
-      Utils.logError(`[Bridge.handleApprovalRequest] Failed to create approval: ${e.message}`);
-      Utils.logError(e.stack);
-      Utils.logTrace(`[Bridge.handleApprovalRequest] ERROR: ${e.message}`);
-      return {
-        success: false,
-        error: `Failed to create approval: ${e.message}`
-      };
-    }
+    // Legacy approval path (human plugin removed): keep non-blocking compatibility behavior.
+    Utils.logWarn(`[Bridge.handleApprovalRequest] Human approval workflow is disabled. Auto-approving legacy request.`);
+    return {
+      success: true,
+      message: 'Approval request auto-approved (human plugin removed)'
+    };
   }
 
   /**
@@ -614,14 +575,12 @@ class Bridge {
     // Import providers (lazy load)
     const { XAIProvider } = await import('../models/providers/xai.mjs');
     const { CopilotProvider } = await import('../models/providers/copilot.mjs');
-    const { GeminiProvider } = await import('../models/providers/gemini.mjs');
     const { OllamaProvider } = await import('../models/providers/ollama.mjs');
     
     let provider;
     switch (providerName.toLowerCase()) {
       case 'xai': provider = new XAIProvider(); break;
       case 'copilot': provider = new CopilotProvider(); break;
-      case 'gemini': provider = new GeminiProvider(); break;
       case 'ollama': provider = new OllamaProvider(); break;
       default: throw new Error(`Unknown provider: ${providerName}`);
     }
