@@ -5,6 +5,7 @@ import yaml from 'js-yaml';
 import { spawn } from 'child_process';
 import os from 'os';
 import { globals } from '../../common/globals.mjs';
+import { SessionModel } from '../agent/models/session.mjs';
 
 function toIsoNow() {
   return new Date().toISOString();
@@ -15,10 +16,6 @@ function normalizeTeamId(input) {
   return `team_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 }
 
-function generateCanonicalSessionId() {
-  return `${Date.now()}-${process.pid}-${crypto.randomBytes(2).toString('hex')}`;
-}
-
 function safeString(value, fallback = '') {
   if (value === undefined || value === null) return fallback;
   return String(value);
@@ -27,6 +24,22 @@ function safeString(value, fallback = '') {
 function safeNumber(value, fallback = null) {
   if (typeof value !== 'number' || Number.isNaN(value)) return fallback;
   return value;
+}
+
+const MIN_WORKER_TURN_LIMIT = 20;
+
+function normalizeSandboxVolumes(rawSpecs = []) {
+  const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
+  const normalized = [];
+
+  for (const raw of specs) {
+    if (typeof raw !== 'string') continue;
+    const spec = raw.trim();
+    if (!spec) continue;
+    normalized.push(spec);
+  }
+
+  return [...new Set(normalized)];
 }
 
 export class TeamPlugin {
@@ -67,10 +80,12 @@ export class TeamPlugin {
                     strict: { type: 'boolean' },
                     read_stdin: { type: 'boolean' },
                     sandbox: { type: 'boolean' },
+                    sandbox_volumes: { type: 'array', items: { type: 'string' } },
                     args: { type: 'array', items: { type: 'string' } }
                   }
                 }
-              }
+              },
+              sandbox_volumes: { type: 'array', items: { type: 'string' } }
             },
             required: ['workers']
           }
@@ -141,14 +156,22 @@ export class TeamPlugin {
     if (context?.__hostRouted) return null;
     if (typeof globals.subdContext.requestToolCallFromHost !== 'function') return null;
 
+    const inheritedVolumes = normalizeSandboxVolumes(globals.subdContext?.sandboxVolumeSpecs || []);
+
     return await globals.subdContext.requestToolCallFromHost({
       toolName,
       args,
-      context: { ...context, __hostRouted: true }
+      context: { ...context, __hostRouted: true, __sandboxVolumes: inheritedVolumes }
     });
   }
 
-  buildSubdArgs(worker = {}, sessionId, teamId) {
+  buildSubdArgs(worker = {}, sessionId, teamId, options = {}) {
+    const inheritedVolumes = normalizeSandboxVolumes(options?.defaultSandboxVolumes || []);
+    const workerVolumes = normalizeSandboxVolumes(worker?.sandbox_volumes || []);
+    const effectiveVolumes = workerVolumes.length > 0 ? workerVolumes : inheritedVolumes;
+    const requestedTurnLimit = Number.isFinite(Number(worker.turn_limit)) ? Number(worker.turn_limit) : null;
+    const effectiveTurnLimit = requestedTurnLimit === null ? null : Math.max(MIN_WORKER_TURN_LIMIT, Math.trunc(requestedTurnLimit));
+
     if (Array.isArray(worker.args) && worker.args.length > 0) {
       const base = worker.args.map(String);
       if (!base.includes('--session-id')) {
@@ -159,6 +182,15 @@ export class TeamPlugin {
         base.unshift(String(teamId));
         base.unshift('--team-id');
       }
+
+      const sandboxEnabled = base.includes('-s');
+      const hasVolumeArg = base.includes('--sandbox-volume');
+      if (sandboxEnabled && !hasVolumeArg && effectiveVolumes.length > 0) {
+        for (const spec of effectiveVolumes) {
+          base.push('--sandbox-volume', spec);
+        }
+      }
+
       return base;
     }
 
@@ -174,8 +206,13 @@ export class TeamPlugin {
     if (worker.jsonl === true) built.push('-j');
     if (worker.strict === true) built.push('--strict');
     if (worker.read_stdin === true) built.push('-i');
-    if (typeof worker.turn_limit === 'number') built.push('-l', String(worker.turn_limit));
+    if (effectiveTurnLimit !== null) built.push('-l', String(effectiveTurnLimit));
     if (worker.sandbox === true) built.push('-s');
+    if (worker.sandbox === true && effectiveVolumes.length > 0) {
+      for (const spec of effectiveVolumes) {
+        built.push('--sandbox-volume', spec);
+      }
+    }
 
     built.push(String(worker.prompt));
     return built;
@@ -230,13 +267,16 @@ export class TeamPlugin {
       }
 
       const teamId = normalizeTeamId(args.team_id);
+      const teamSandboxVolumes = normalizeSandboxVolumes(
+        args.sandbox_volumes || context?.__sandboxVolumes || globals.subdContext?.sandboxVolumeSpecs || []
+      );
       const now = toIsoNow();
       const members = [];
       const launchErrors = [];
 
       for (let index = 0; index < workers.length; index++) {
         const worker = workers[index] || {};
-        const sessionId = generateCanonicalSessionId();
+        const sessionId = SessionModel.generateId();
         const requestedSessionId = safeString(worker.session_id, '');
 
         if (!this.templateExists(worker.template)) {
@@ -259,7 +299,9 @@ export class TeamPlugin {
           continue;
         }
 
-        const forwardArgs = this.buildSubdArgs(worker, sessionId, teamId);
+        const forwardArgs = this.buildSubdArgs(worker, sessionId, teamId, {
+          defaultSandboxVolumes: teamSandboxVolumes
+        });
 
         if (globals.subdContext?.agentMode && typeof globals.subdContext.requestSpawnSubdFromHost === 'function') {
           const spawnArgs = [...forwardArgs];
@@ -353,6 +395,7 @@ export class TeamPlugin {
         status: launchErrors.length > 0 ? 'partial' : 'active',
         created_at: now,
         updated_at: toIsoNow(),
+        sandbox_volumes: teamSandboxVolumes,
         members,
         launch_errors: launchErrors
       };

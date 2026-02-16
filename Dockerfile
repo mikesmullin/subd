@@ -21,4 +21,6 @@ RUN cargo build --manifest-path /app/cmd_proxy/Cargo.toml --release \
 
 USER app
 
+STOPSIGNAL SIGQUIT
+
 CMD ["subd"]

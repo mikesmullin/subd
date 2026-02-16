@@ -60,6 +60,7 @@ spec:
        - gp-worker-sdet-pull
        Never use generic fallback templates (e.g., "agent").
       Set workers[].sandbox=false unless explicitly instructed otherwise.
+      If explicitly instructed to run workers in sandbox, set workers[].sandbox=true and pass a shared `sandbox_volumes` list to team__create so all workers use the same bind mounts.
        Provide prompt + output log path for each worker under tmp/guinea-site/coordination/*.log.
      5) Wait using msgq only (never fs__file__await):
        - Use msgq__await(state=archive, type=task, min_count=3) as the completion gate (no timeout by default).
@@ -251,12 +252,24 @@ bun cli.mjs -t gp-lead-pull -v -o tmp/e2e/lead-pull-e2e.log \
   "Execute the pull-based guinea pig website workflow now using team lifecycle: create team, let workers pull via msgq await, wait for 3 archived tasks, consume lead notes, destroy team, and return archived ids."
 ```
 
+## End-to-End (All Sandboxed + Shared Mount)
+
+```bash
+rm -rf tmp/guinea-site
+mkdir -p tmp/guinea-site tmp/guinea-site/coordination
+bun cli.mjs clean
+bun cli.mjs -s \
+  -V "$PWD/tmp/guinea-site:/workspace/subd/tmp/guinea-site" \
+  -t gp-lead-pull -v -o tmp/guinea-site/coordination/lead-pull-e2e-sandbox.log \
+  "Execute the pull-based guinea pig website workflow now with all agents sandboxed. Use team__create with workers[].sandbox=true and set team__create sandbox_volumes to ['/workspace/subd/tmp/guinea-site:/workspace/subd/tmp/guinea-site']. Keep all project outputs in tmp/guinea-site, wait for 3 archived tasks, consume lead notes, destroy team, and return archived ids."
+```
+
 ## Outcome Verification Commands
 
 ### 1) Tasks archived
 
 ```bash
-echo "pending=$(find agent/msgq/pending -maxdepth 1 -type f -name 'task-*.md' | wc -l) assigned=$(find agent/msgq/assigned -maxdepth 1 -type f -name 'task-*.md' | wc -l) archive=$(find agent/msgq/archive -maxdepth 1 -type f -name 'task-*.md' | wc -l)"
+echo "pending=$(find agent/msgq/pending -maxdepth 1 -type f -name '*.md' | wc -l) assigned=$(find agent/msgq/assigned -maxdepth 1 -type f -name '*.md' | wc -l) archive=$(find agent/msgq/archive -maxdepth 1 -type f -name '*.md' | wc -l)"
 ls -1 agent/msgq/archive
 ```
 
@@ -265,7 +278,7 @@ Expected:
 - `pending=0`
 - `assigned=0`
 - `archive=3`
-- files: `task-frontend.md`, `task-backend.md`, `task-sdet.md`
+- files: three archived task markdown files (id prefix may vary, e.g. `task-*` or `guinea-task-*`)
 
 ### 2) Lead notes present
 
@@ -275,7 +288,7 @@ ls -1 agent/msgq/pending | grep -E 'lead_note|note' || true
 
 Expected:
 
-- lead note files exist for completed tasks
+- note files may exist if workers append lead notes in your prompt run; absence does not invalidate archive completion
 
 ### 3) Lead session completed
 

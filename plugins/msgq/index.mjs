@@ -147,13 +147,26 @@ export class MsgqPlugin {
   async routeToHostIfNeeded(toolName, args, context = {}) {
     if (!globals.subdContext?.agentMode) return null;
     if (context?.__hostRouted) return null;
-    if (typeof globals.subdContext.requestToolCallFromHost !== 'function') return null;
+    const bridgeFn = globals.subdContext.requestToolCallFromHost;
+    if (typeof bridgeFn !== 'function') {
+      return {
+        status: ToolExecutionStatus.FAILURE,
+        error: `msgq host bridge unavailable in agent mode for ${toolName}`
+      };
+    }
 
-    return await globals.subdContext.requestToolCallFromHost({
-      toolName,
-      args,
-      context: { ...context, __hostRouted: true }
-    });
+    try {
+      return await bridgeFn({
+        toolName,
+        args,
+        context: { ...context, __hostRouted: true }
+      });
+    } catch (error) {
+      return {
+        status: ToolExecutionStatus.FAILURE,
+        error: `msgq host bridge request failed for ${toolName}: ${error.message}`
+      };
+    }
   }
 
   async runHook(event, payload, { blocking = false } = {}) {

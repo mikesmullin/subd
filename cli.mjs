@@ -6,7 +6,7 @@ import yaml from 'js-yaml';
 import os from 'os';
 import net from 'net';
 import crypto from 'crypto';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { globals } from './common/globals.mjs';
 import { Utils } from './common/utils.mjs';
 import { HooksRuntime } from './common/hooks-runtime.mjs';
@@ -50,10 +50,79 @@ import { ShellPlugin } from './plugins/shell/index.mjs';
 import { MsgqPlugin } from './plugins/msgq/index.mjs';
 import { TeamPlugin } from './plugins/team/index.mjs';
 import { AgentPlugin } from './plugins/agent/controllers/agent.mjs';
-import { SubdPlugin } from './plugins/subd/index.mjs';
 
 const INTERNAL_FLAGS = new Set(['-a', '--sandbox-host', '--sandbox-port', '--sandbox-token']);
-const SESSION_ID_PATTERN = /^\d{13}-\d+-[a-f0-9]{4}$/i;
+
+function parseSandboxVolumes(rawSpecs = []) {
+  const specs = Array.isArray(rawSpecs) ? rawSpecs : [rawSpecs];
+  const normalized = [];
+
+  for (const raw of specs) {
+    if (typeof raw !== 'string') continue;
+    const spec = raw.trim();
+    if (!spec) continue;
+    normalized.push(spec);
+  }
+
+  return [...new Set(normalized)];
+}
+
+function parseVolumeSpec(spec) {
+  const firstSep = spec.indexOf(':');
+  if (firstSep <= 0) return null;
+  const secondSep = spec.indexOf(':', firstSep + 1);
+
+  if (secondSep < 0) {
+    return {
+      hostPath: spec.slice(0, firstSep),
+      containerPath: spec.slice(firstSep + 1),
+      options: ''
+    };
+  }
+
+  return {
+    hostPath: spec.slice(0, firstSep),
+    containerPath: spec.slice(firstSep + 1, secondSep),
+    options: spec.slice(secondSep + 1)
+  };
+}
+
+function formatVolumeSpec({ hostPath, containerPath, options }) {
+  if (!options) return `${hostPath}:${containerPath}`;
+  return `${hostPath}:${containerPath}:${options}`;
+}
+
+function addSandboxVolumeAliases(specs = []) {
+  const out = [...specs];
+  const seen = new Set(specs);
+
+  for (const spec of specs) {
+    const parsed = parseVolumeSpec(spec);
+    if (!parsed) continue;
+
+    const { hostPath, containerPath, options } = parsed;
+    if (!containerPath.startsWith('/workspace/subd/')) continue;
+
+    const suffix = containerPath.slice('/workspace/subd/'.length);
+    const aliasContainerPath = `/app/${suffix}`;
+    const aliasSpec = formatVolumeSpec({ hostPath, containerPath: aliasContainerPath, options });
+    if (!seen.has(aliasSpec)) {
+      seen.add(aliasSpec);
+      out.push(aliasSpec);
+    }
+  }
+
+  return out;
+}
+
+function parseSandboxVolumesEnv(rawEnv) {
+  if (typeof rawEnv !== 'string' || !rawEnv.trim()) return [];
+  const parts = rawEnv
+    .split('\n')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return parseSandboxVolumes(parts);
+}
 
 function sanitizeForwardArgs(rawArgs = []) {
   const sanitized = [];
@@ -141,6 +210,22 @@ function spawnSubdOnHost(forwardArgs, options = {}) {
   });
 }
 
+function prepareSandboxWritableDirs() {
+  const dirs = [
+    path.resolve(process.cwd(), 'tmp'),
+    path.resolve(process.cwd(), 'tmp/guinea-site')
+  ];
+
+  for (const dir of dirs) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.chmodSync(dir, 0o777);
+    } catch (error) {
+      Utils.logWarn(`Failed to set sandbox writable permissions on ${dir}: ${error.message}`);
+    }
+  }
+}
+
 async function executeToolOnHost(toolName, args, context = {}, toolOptions = null) {
   const handler = globals.dslRegistry.get(toolName);
   if (!handler) {
@@ -201,6 +286,7 @@ async function createChatCompletionOnHost(modelStr, messages, tools) {
 
 async function startSandboxTcpServer(authToken, options = {}) {
   const cmdProxyAllowlist = options.cmdProxyAllowlist || await loadCmdProxyAllowlist();
+  const sandboxSessionIdMap = new Map();
 
   const server = net.createServer((socket) => {
     let buffer = '';
@@ -284,15 +370,37 @@ async function startSandboxTcpServer(authToken, options = {}) {
             );
             sendSocketMessage({ id: request.id, ok: true, result });
           } else if (request?.type === 'session_save') {
-            const sessionId = request?.sessionId ? String(request.sessionId) : null;
+            const requestedSessionId = request?.sessionId ? String(request.sessionId) : null;
             const sessionData = request?.sessionData;
-            if (!sessionId || !sessionData || typeof sessionData !== 'object') {
+            if (!requestedSessionId || !sessionData || typeof sessionData !== 'object') {
               sendSocketMessage({ id: request.id, ok: false, error: 'Invalid session_save payload' });
               continue;
             }
 
+            let sessionId = requestedSessionId;
+            if (!SessionModel.isCanonicalId(sessionId)) {
+              if (!sandboxSessionIdMap.has(sessionId)) {
+                sandboxSessionIdMap.set(sessionId, SessionModel.generateId());
+              }
+              sessionId = sandboxSessionIdMap.get(sessionId);
+            }
+
+            if (!sessionData.metadata || typeof sessionData.metadata !== 'object') {
+              sessionData.metadata = {};
+            }
+            sessionData.metadata.id = sessionId;
+            if (sessionId !== requestedSessionId) {
+              const currentContainerId = typeof sessionData.metadata.containerId === 'string'
+                ? sessionData.metadata.containerId
+                : '';
+              if (currentContainerId.startsWith(`${requestedSessionId}_`)) {
+                const suffix = currentContainerId.slice(requestedSessionId.length + 1);
+                sessionData.metadata.containerId = `${sessionId}_${suffix}`;
+              }
+            }
+
             SessionModel.save(sessionId, sessionData);
-            sendSocketMessage({ id: request.id, ok: true });
+            sendSocketMessage({ id: request.id, ok: true, sessionId });
           } else if (request?.type === 'cmd_proxy_exec_start') {
             const command = typeof request.command === 'string' ? request.command.trim() : '';
             const commandArgs = Array.isArray(request.args) ? request.args.map(String) : [];
@@ -596,6 +704,7 @@ let sandboxPortArg = null;
 let sandboxTokenArg = null;
 let sessionIdArg = null;
 let teamIdArg = null;
+let sandboxVolumeSpecs = [];
 let promptParts = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -629,10 +738,18 @@ for (let i = 0; i < args.length; i++) {
     sessionIdArg = args[++i];
   } else if (args[i] === '--team-id') {
     teamIdArg = args[++i];
+  } else if (args[i] === '--sandbox-volume' || args[i] === '-V') {
+    sandboxVolumeSpecs.push(args[++i]);
   } else {
     promptParts.push(args[i]);
   }
 }
+
+sandboxVolumeSpecs = parseSandboxVolumes([
+  ...parseSandboxVolumesEnv(process.env.SUBD_SANDBOX_VOLUMES),
+  ...sandboxVolumeSpecs
+]);
+sandboxVolumeSpecs = addSandboxVolumeAliases(sandboxVolumeSpecs);
 
 const sandboxBridgeConfig = {
   host: sandboxHostArg || process.env.SUBD_SANDBOX_HOST || null,
@@ -643,6 +760,7 @@ const sandboxBridgeConfig = {
 globals.subdContext = {
   sandboxMode,
   agentMode,
+  sandboxVolumeSpecs,
   sandboxBridgeConfig,
   requestSpawnSubdFromHost: (forwardArgs, options) => requestSpawnSubdFromHost(sandboxBridgeConfig, forwardArgs, options),
   requestTemplateFromHost: (requestedTemplatePath) => requestTemplateFromHost(sandboxBridgeConfig, requestedTemplatePath),
@@ -744,12 +862,13 @@ async function triggerHook(event, payload = {}, { blocking = false } = {}) {
 const userPrompt = promptParts.join(' ');
 
 if (!templatePath || !userPrompt) {
-  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] [-s] [--session-id <id>] [--team-id <team>] <prompt...>');
+  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] [-s] [-V <host_path:container_path[:options]> ...] [--sandbox-volume <host_path:container_path[:options]> ...] [--session-id <id>] [--team-id <team>] <prompt...>');
   process.exit(1);
 }
 
 if (sandboxMode && !agentMode) {
   const runId = `sandbox-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const containerName = `subd-${runId}`;
   const sandboxToken = crypto.randomBytes(32).toString('hex');
   const sandboxHost = process.env.SUBD_SANDBOX_HOST_FOR_CONTAINER || 'host.containers.internal';
   let sandboxServer = null;
@@ -766,7 +885,6 @@ if (sandboxMode && !agentMode) {
     new MsgqPlugin();
     new TeamPlugin();
     new AgentPlugin();
-    new SubdPlugin();
 
     const started = await startSandboxTcpServer(sandboxToken, {
       cmdProxyAllowlist: sandboxCmdProxyAllowlist
@@ -775,13 +893,17 @@ if (sandboxMode && !agentMode) {
     sandboxPort = started.port;
 
     const forwardedArgs = sanitizeForwardArgs(args);
+    const volumeArgs = sandboxVolumeSpecs.flatMap((spec) => ['-v', spec]);
+    prepareSandboxWritableDirs();
     const containerArgs = [
       'run', '--rm', '--init',
-      '--name', `subd-${runId}`,
+      '--name', containerName,
       '--label', `subd.sandbox.run=${runId}`,
       '-e', `SUBD_SANDBOX_HOST=${sandboxHost}`,
       '-e', `SUBD_SANDBOX_PORT=${sandboxPort}`,
       '-e', `SUBD_SANDBOX_TOKEN=${sandboxToken}`,
+      '-e', `SUBD_SANDBOX_VOLUMES=${sandboxVolumeSpecs.join('\n')}`,
+      ...volumeArgs,
       globals.containerImage,
       'subd',
       ...forwardedArgs,
@@ -795,10 +917,53 @@ if (sandboxMode && !agentMode) {
       stdio: 'inherit'
     });
 
+    const signalHandlers = [];
+    let shutdownRequested = false;
+
+    const tryStopSandboxContainer = (signal = 'SIGTERM') => {
+      try {
+        spawnSync(globals.containerRuntime, ['stop', '--ignore', '--time', '2', '--signal', signal, containerName], {
+          stdio: 'ignore'
+        });
+      } catch {}
+
+      try {
+        spawnSync(globals.containerRuntime, ['kill', '--signal', 'KILL', containerName], {
+          stdio: 'ignore'
+        });
+      } catch {}
+    };
+
+    const handleSignal = (signal) => {
+      if (shutdownRequested) return;
+      shutdownRequested = true;
+
+      try {
+        child.kill(signal);
+      } catch {}
+
+      const timer = setTimeout(() => {
+        tryStopSandboxContainer(signal);
+      }, 1500);
+      if (typeof timer?.unref === 'function') {
+        timer.unref();
+      }
+    };
+
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGQUIT']) {
+      const listener = () => handleSignal(signal);
+      process.on(signal, listener);
+      signalHandlers.push([signal, listener]);
+    }
+
     const exitCode = await new Promise((resolve, reject) => {
       child.on('error', reject);
       child.on('close', (code) => resolve(code ?? 1));
     });
+
+    for (const [signal, listener] of signalHandlers) {
+      process.off(signal, listener);
+    }
 
     process.exit(exitCode);
   } catch (e) {
@@ -926,7 +1091,6 @@ new ShellPlugin();
 new MsgqPlugin();
 new TeamPlugin();
 new AgentPlugin();
-new SubdPlugin();
 
 async function persistSession(sessionId, sessionData) {
   if (agentMode) {
@@ -961,14 +1125,12 @@ async function appendMaxTurnsPolicyMessage(sessionId, effectiveTurnLimit) {
 }
 
 // Create Session
-let sessionId = SessionModel.generateId();
-if (sessionIdArg && String(sessionIdArg).trim()) {
-  const requestedSessionId = String(sessionIdArg).trim();
-  if (!SESSION_ID_PATTERN.test(requestedSessionId)) {
-    console.error(`Invalid --session-id format: ${requestedSessionId}. Expected pattern: <timestampMs>-<pid>-<hex4>.`);
-    process.exit(1);
-  }
-  sessionId = requestedSessionId;
+let sessionId;
+try {
+  sessionId = SessionModel.ensureCanonicalId(sessionIdArg || null);
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
 }
 const templateName = path.basename(fullTemplatePath, path.extname(fullTemplatePath));
 Utils.logInfo(`Creating session ${sessionId}...`);

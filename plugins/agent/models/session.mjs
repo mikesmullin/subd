@@ -5,6 +5,8 @@ import { FSM } from '../../../common/fsm.mjs';
 import path from 'path';
 import crypto from 'crypto';
 
+export const SESSION_ID_PATTERN = /^\d{13}-\d+-[a-f0-9]{4}$/i;
+
 // Session states
 export const SessionState = {
   PENDING: 'pending',
@@ -56,11 +58,25 @@ export class SessionModel {
   }
 
   static generateId() {
-    this.init();
     const ts = Date.now();
     const pid = process.pid;
     const rand = crypto.randomBytes(2).toString('hex');
     return `${ts}-${pid}-${rand}`;
+  }
+
+  static isCanonicalId(id) {
+    return typeof id === 'string' && SESSION_ID_PATTERN.test(id.trim());
+  }
+
+  static ensureCanonicalId(id = null) {
+    if (typeof id === 'string' && id.trim()) {
+      const trimmed = id.trim();
+      if (!this.isCanonicalId(trimmed)) {
+        throw new Error(`Invalid session id format: ${trimmed}. Expected: <timestampMs>-<pid>-<hex4>`);
+      }
+      return trimmed;
+    }
+    return this.generateId();
   }
 
   static resetId() {
@@ -99,13 +115,14 @@ export class SessionModel {
   }
 
   static create(id, data, options = { persist: true }) {
+    const canonicalId = this.ensureCanonicalId(id);
     const createdAt = new Date();
-    const containerId = `${id}_${Math.floor(createdAt.getTime() / 1000)}`;
+    const containerId = `${canonicalId}_${Math.floor(createdAt.getTime() / 1000)}`;
     const session = { 
       apiVersion: 'daemon/v1',
       kind: 'Agent',
       metadata: {
-        id,
+        id: canonicalId,
         name: data.name,
         containerId,  // Unique container name: {sessionId}_{unixTimestamp}
         created: createdAt.toISOString(),
@@ -125,7 +142,7 @@ export class SessionModel {
     
     // Only persist to collection if requested (host agent creation should NOT persist)
     if (options.persist) {
-      collection.set(id, session);
+      collection.set(canonicalId, session);
     }
     return session;
   }
@@ -135,7 +152,12 @@ export class SessionModel {
   }
 
   static save(id, data) {
-    collection.set(id, data);
+    const canonicalId = this.ensureCanonicalId(id);
+    if (!data.metadata || typeof data.metadata !== 'object') {
+      data.metadata = {};
+    }
+    data.metadata.id = canonicalId;
+    collection.set(canonicalId, data);
     collection.save();
   }
 

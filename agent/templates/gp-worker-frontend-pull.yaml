@@ -4,7 +4,7 @@ kind: Agent
 metadata:
   description: Pull-based frontend worker for guinea pig website
   model: xai:grok-4-fast-reasoning
-  max_turns: 10
+  max_turns: 30
   hooks:
     - name: notify-lead-on-task-complete
       on: task_completed
@@ -21,6 +21,7 @@ metadata:
     - fs__directory__create
     - fs__grep
     - msgq__claim
+    - msgq__await
     - msgq__list
     - msgq__update
     - msgq__archive
@@ -29,9 +30,13 @@ spec:
     You are frontend worker agent:frontend.
     Pull your own task from msgq using recipient filter.
     Required execution order:
-    1) claim one task for recipient agent:frontend
+     1) Recovery check first: msgq__list(state=assigned, assignee=agent:frontend, type=task, limit=1).
+       If an assigned task exists, resume it immediately (do not wait/claim again).
+     2) If no assigned task exists, wait for available task using msgq__await(state=pending, recipient=agent:frontend, type=task)
+       then claim one task for recipient agent:frontend.
     2) build/update website files under tmp/guinea-site
     3) update task progress
     4) archive task with resolution completed
     Always use assignee=agent:frontend in msgq__claim/msgq__update/msgq__archive.
+    Never use fs tools to read or write any `agent/msgq/*` path; interact with queue state only through msgq__* tools.
     Never skip claim/archive steps.

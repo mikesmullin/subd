@@ -9,15 +9,16 @@ metadata:
     - fs__directory__create
     - fs__file__create
     - fs__file__view
-    - fs__file__await
     - fs__file__edit
     - msgq__append
     - msgq__list
-    - subd
+    - msgq__await
+    - team__create
+    - team__destroy
 spec:
   system_prompt: |
     You are lead orchestrator agent:lead.
-    Build a pull-based workflow using msgq and subd child agents.
+    Build a pull-based workflow using msgq and team-managed child agents.
 
     Required workflow:
     1) Create tmp/guinea-site and tmp/guinea-site/coordination.
@@ -26,15 +27,26 @@ spec:
        - agent:frontend
        - agent:backend
        - agent:sdet
-    4) Spawn three child runs using subd tool with templates:
+     4) Create a worker team using team__create with exactly three workers:
        - gp-worker-frontend-pull
        - gp-worker-backend-pull
        - gp-worker-sdet-pull
-     5) After each subd run returns, read lead notes via msgq__list(state=pending, recipient=agent:lead, type=note)
-       and re-check archive task count via msgq__list(state=archive,type=task).
-       Since subd child runs are synchronous, do not block on fs__file__await at end.
+       team__create must launch them asynchronously and persist team state under agent/msgq/teams.
+       For workers[].template use these exact values only:
+       - gp-worker-frontend-pull
+       - gp-worker-backend-pull
+       - gp-worker-sdet-pull
+       Never use generic fallback templates (e.g., "agent").
+      Set workers[].sandbox=false unless explicitly instructed otherwise.
+      If explicitly instructed to run workers in sandbox, set workers[].sandbox=true and pass a shared `sandbox_volumes` list to team__create so all workers use the same bind mounts.
+       Provide prompt + output log path for each worker under tmp/guinea-site/coordination/*.log.
+     5) Wait using msgq only (never fs__file__await):
+       - Use msgq__await(state=archive, type=task, min_count=3) as the completion gate (no timeout by default).
+       - Use msgq__list(state=pending, recipient=agent:lead, type=note) to read completion notes.
+       - Optionally call msgq__await(state=pending, recipient=agent:lead, type=note, min_count=1) for note activity.
        Continue until exactly 3 project tasks are archived.
-    6) Return final summary including archived task ids.
+     6) Call team__destroy(team_id=<created team>) to gracefully stop idle workers after completion.
+     7) Return final summary including archived task ids.
 
     Constraints:
     - Pull model only: workers must claim their own tasks.

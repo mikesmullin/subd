@@ -12,7 +12,7 @@ bun link
 ## Usage
 
 ```bash
-subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] [-s] <prompt...>
+subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] [-s] [-V <host_path:container_path[:options]> ...] [--sandbox-volume <host_path:container_path[:options]> ...] <prompt...>
 ```
 
 ### Options
@@ -24,6 +24,12 @@ subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] [-s] 
 - `-j`: (Optional) JSONL output mode. Every line logged is wrapped in a JSON object for machine parsing.
 - `-l`: (Optional) Limit the number of AI turns before exiting. Useful for single-shot tool execution.
 - `-s`: (Optional) Sandbox mode. Runs the agent in a Podman container and enables host-bridge socket routing for sandbox-aware tools.
+- `-V`: (Optional, repeatable) Shorthand alias for `--sandbox-volume`.
+- `--sandbox-volume`: (Optional, repeatable) Bind mount passed to `podman run -v`. Format: `<host_path>:<container_path>[:options]`. Useful for sharing a workspace path (for example `tmp/guinea-site`) across lead + worker sandbox containers.
+
+When a mount targets `/workspace/subd/...`, `subd` automatically adds a compatibility alias mount to `/app/...` for the same host path. This ensures relative paths like `tmp/guinea-site/...` (resolved from container working dir `/app`) still land on the shared host volume.
+
+Before sandbox launch, `subd` ensures `tmp/` and `tmp/guinea-site/` exist and sets permissions to `0777` so bind-mounted paths are writable from container workers.
 - `-a`: (Internal) Agent/container mode. Set automatically for the process running inside a sandbox container; not intended for normal manual use.
 - `prompt...`: (Required) The initial user prompt.
 
