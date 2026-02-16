@@ -1,0 +1,23 @@
+---
+apiVersion: daemon/v1
+kind: Agent
+metadata:
+  description: Smoke test template for memory-like hook flow
+  model: xai:grok-4-fast-reasoning
+  hooks:
+    - name: mock-memory-recall
+      on: user_prompt_submit
+      do:
+        type: command
+        command: "./tmp/hooks/memory_recall.sh"
+        timeout: 10
+    - name: mock-memory-save
+      on: assistant_response_emit
+      do:
+        type: command
+        command: "./tmp/hooks/memory_save.sh"
+        timeout: 10
+spec:
+  system_prompt: |
+    You are a concise assistant.
+    Reply in one short sentence.

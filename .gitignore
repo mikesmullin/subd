@@ -5,8 +5,8 @@
 # logs and temporary files
 db/*
 agent/sessions/*
-agent/sessions/*.yml
-agent/sessions/*.yaml
+agent/msgq/*
+agent/workspace/*
 
 # npm modules
 node_modules/

@@ -29,11 +29,10 @@ Dockerfile
 
 # Database files (will be mounted)
 db/
-agent/sessions/*.yml
-agent/groups/*.yml
-agent/workspaces/
-agent/templates/
 agent/sessions/
+agent/templates/
+agent/msgq/
+agent/workspaces/
 
 # Test files
 tests/

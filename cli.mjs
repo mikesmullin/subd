@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { globals } from './common/globals.mjs';
 import { Utils } from './common/utils.mjs';
+import { HooksRuntime } from './common/hooks-runtime.mjs';
 import { checkCmdProxyCommand, loadCmdProxyAllowlist } from './plugins/shell/cmd-proxy-allowlist.mjs';
 import { SessionModel, SessionState } from './plugins/agent/models/session.mjs';
 import { TemplateModel } from './plugins/agent/models/template.mjs';
@@ -46,10 +47,13 @@ async function getProviderForModel(modelStr) {
 import { CorePlugin } from './plugins/core/index.mjs';
 import { FsPlugin } from './plugins/fs/index.mjs';
 import { ShellPlugin } from './plugins/shell/index.mjs';
+import { MsgqPlugin } from './plugins/msgq/index.mjs';
+import { TeamPlugin } from './plugins/team/index.mjs';
 import { AgentPlugin } from './plugins/agent/controllers/agent.mjs';
 import { SubdPlugin } from './plugins/subd/index.mjs';
 
 const INTERNAL_FLAGS = new Set(['-a', '--sandbox-host', '--sandbox-port', '--sandbox-token']);
+const SESSION_ID_PATTERN = /^\d{13}-\d+-[a-f0-9]{4}$/i;
 
 function sanitizeForwardArgs(rawArgs = []) {
   const sanitized = [];
@@ -64,8 +68,41 @@ function sanitizeForwardArgs(rawArgs = []) {
   return sanitized;
 }
 
-function spawnSubdOnHost(forwardArgs) {
+function spawnSubdOnHost(forwardArgs, options = {}) {
+  const wait = options.wait !== false;
   const cliPath = path.resolve(import.meta.dirname, 'cli.mjs');
+
+  if (!wait) {
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, [cliPath, ...forwardArgs], {
+        cwd: process.cwd(),
+        env: process.env,
+        detached: true,
+        stdio: 'ignore'
+      });
+
+      child.on('error', (error) => {
+        resolve({
+          ok: false,
+          error: error.message,
+          exitCode: 1,
+          stdout: '',
+          stderr: ''
+        });
+      });
+
+      child.unref();
+      resolve({
+        ok: true,
+        started: true,
+        pid: child.pid ?? null,
+        exitCode: null,
+        stdout: '',
+        stderr: ''
+      });
+    });
+  }
+
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [cliPath, ...forwardArgs], {
       cwd: process.cwd(),
@@ -220,7 +257,8 @@ async function startSandboxTcpServer(authToken, options = {}) {
         try {
           if (request?.type === 'spawn_subd') {
             const forwardArgs = sanitizeForwardArgs(Array.isArray(request.args) ? request.args.map(String) : []);
-            const result = await spawnSubdOnHost(forwardArgs);
+            const wait = request?.wait !== false;
+            const result = await spawnSubdOnHost(forwardArgs, { wait });
             sendSocketMessage({ id: request.id, ...result });
           } else if (request?.type === 'resolve_template') {
             const resolvedPath = resolveTemplatePath(request.templatePath);
@@ -369,7 +407,7 @@ async function startSandboxTcpServer(authToken, options = {}) {
   return { server, port };
 }
 
-async function requestSpawnSubdFromHost(bridgeConfig, forwardArgs) {
+async function requestSpawnSubdFromHost(bridgeConfig, forwardArgs, options = {}) {
   if (!bridgeConfig?.host || !bridgeConfig?.port || !bridgeConfig?.token) {
     throw new Error('Sandbox bridge is not configured');
   }
@@ -385,7 +423,8 @@ async function requestSpawnSubdFromHost(bridgeConfig, forwardArgs) {
         id,
         token: bridgeConfig.token,
         type: 'spawn_subd',
-        args: sanitizeForwardArgs(forwardArgs)
+        args: sanitizeForwardArgs(forwardArgs),
+        wait: options.wait !== false
       };
       socket.write(JSON.stringify(request) + '\n');
     });
@@ -510,15 +549,34 @@ async function requestSessionSaveFromHost(bridgeConfig, payload) {
 // Handle subcommands
 const args = process.argv.slice(2);
 if (args[0] === 'clean') {
-  const sessionsDir = path.resolve(import.meta.dirname, 'agent/sessions');
-  const files = fs.existsSync(sessionsDir) 
-    ? fs.readdirSync(sessionsDir).filter(f => f.endsWith('.yml'))
-    : [];
-  for (const file of files) {
-    fs.unlinkSync(path.join(sessionsDir, file));
+  const projectRoot = path.resolve(import.meta.dirname);
+  const summary = {
+    sessionFiles: 0,
+    queueFiles: 0
+  };
+
+  const sessionsDir = path.join(projectRoot, 'agent/sessions');
+  if (fs.existsSync(sessionsDir)) {
+    const sessionFiles = fs.readdirSync(sessionsDir).filter((name) => name.endsWith('.yml'));
+    for (const file of sessionFiles) {
+      fs.unlinkSync(path.join(sessionsDir, file));
+      summary.sessionFiles += 1;
+    }
   }
 
-  console.log(`Removed ${files.length} session file(s).`);
+  const queueStates = ['pending', 'assigned', 'archive', 'teams'];
+  for (const state of queueStates) {
+    const stateDir = path.join(projectRoot, 'agent/msgq', state);
+    if (!fs.existsSync(stateDir)) continue;
+    const queueFiles = fs.readdirSync(stateDir).filter((name) => name.endsWith('.md') || name.endsWith('.yml') || name.includes('.tmp-'));
+    for (const file of queueFiles) {
+      fs.unlinkSync(path.join(stateDir, file));
+      summary.queueFiles += 1;
+    }
+  }
+
+  const totalRemoved = summary.sessionFiles + summary.queueFiles;
+  console.log(`Cleaned agent runtime artifacts: ${totalRemoved} item(s) removed (${summary.sessionFiles} sessions, ${summary.queueFiles} queue files).`);
   process.exit(0);
 }
 
@@ -536,6 +594,8 @@ let agentMode = false;
 let sandboxHostArg = null;
 let sandboxPortArg = null;
 let sandboxTokenArg = null;
+let sessionIdArg = null;
+let teamIdArg = null;
 let promptParts = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -565,6 +625,10 @@ for (let i = 0; i < args.length; i++) {
     sandboxPortArg = args[++i];
   } else if (args[i] === '--sandbox-token') {
     sandboxTokenArg = args[++i];
+  } else if (args[i] === '--session-id') {
+    sessionIdArg = args[++i];
+  } else if (args[i] === '--team-id') {
+    teamIdArg = args[++i];
   } else {
     promptParts.push(args[i]);
   }
@@ -580,7 +644,7 @@ globals.subdContext = {
   sandboxMode,
   agentMode,
   sandboxBridgeConfig,
-  requestSpawnSubdFromHost: (forwardArgs) => requestSpawnSubdFromHost(sandboxBridgeConfig, forwardArgs),
+  requestSpawnSubdFromHost: (forwardArgs, options) => requestSpawnSubdFromHost(sandboxBridgeConfig, forwardArgs, options),
   requestTemplateFromHost: (requestedTemplatePath) => requestTemplateFromHost(sandboxBridgeConfig, requestedTemplatePath),
   requestAICompletionFromHost: (payload) => requestAICompletionFromHost(sandboxBridgeConfig, payload),
   requestToolCallFromHost: (payload) => requestToolCallFromHost(sandboxBridgeConfig, payload),
@@ -665,10 +729,22 @@ function logAssistant(text) {
   }
 }
 
+async function triggerHook(event, payload = {}, { blocking = false } = {}) {
+  if (!globals.hooksRuntime) return { ok: true, blocked: false };
+  try {
+    return await globals.hooksRuntime.trigger(event, payload, { blocking });
+  } catch (error) {
+    if (blocking) {
+      return { ok: false, blocked: true, reason: error.message };
+    }
+    return { ok: true, blocked: false };
+  }
+}
+
 const userPrompt = promptParts.join(' ');
 
 if (!templatePath || !userPrompt) {
-  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] [-s] <prompt...>');
+  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] [-s] [--session-id <id>] [--team-id <team>] <prompt...>');
   process.exit(1);
 }
 
@@ -687,6 +763,8 @@ if (sandboxMode && !agentMode) {
     new CorePlugin();
     new FsPlugin();
     new ShellPlugin();
+    new MsgqPlugin();
+    new TeamPlugin();
     new AgentPlugin();
     new SubdPlugin();
 
@@ -785,6 +863,12 @@ if (agentMode) {
 
 // Load Template
 const template = yaml.load(templateContent);
+const hooksRuntime = new HooksRuntime({
+  template,
+  cliPath: path.resolve(import.meta.dirname, 'cli.mjs')
+});
+await hooksRuntime.init();
+globals.hooksRuntime = hooksRuntime;
 
 // Load Data
 let data = {};
@@ -839,6 +923,8 @@ globals.config.unattended = true;
 new CorePlugin();
 new FsPlugin();
 new ShellPlugin();
+new MsgqPlugin();
+new TeamPlugin();
 new AgentPlugin();
 new SubdPlugin();
 
@@ -855,14 +941,78 @@ async function persistSession(sessionId, sessionData) {
   SessionModel.save(sessionId, sessionData);
 }
 
+async function appendMaxTurnsPolicyMessage(sessionId, effectiveTurnLimit) {
+  const currentSession = SessionModel.load(sessionId);
+  if (!currentSession?.spec?.messages) return;
+
+  const note = `unable to continue; max turns policy exceeded (limit=${effectiveTurnLimit})`;
+  const alreadyPresent = currentSession.spec.messages.some(
+    (message) => message?.role === 'user' && typeof message?.content === 'string' && message.content.includes(note)
+  );
+  if (alreadyPresent) return;
+
+  currentSession.spec.messages.push({
+    role: 'user',
+    content: note,
+    timestamp: new Date().toISOString()
+  });
+
+  await persistSession(sessionId, currentSession);
+}
+
 // Create Session
-const sessionId = SessionModel.generateId();
+let sessionId = SessionModel.generateId();
+if (sessionIdArg && String(sessionIdArg).trim()) {
+  const requestedSessionId = String(sessionIdArg).trim();
+  if (!SESSION_ID_PATTERN.test(requestedSessionId)) {
+    console.error(`Invalid --session-id format: ${requestedSessionId}. Expected pattern: <timestampMs>-<pid>-<hex4>.`);
+    process.exit(1);
+  }
+  sessionId = requestedSessionId;
+}
 const templateName = path.basename(fullTemplatePath, path.extname(fullTemplatePath));
 Utils.logInfo(`Creating session ${sessionId}...`);
+
+const sessionStartHook = await triggerHook('session_start', {
+  session_id: sessionId,
+  initial_prompt: userPrompt,
+  previous_session_id: null,
+  team_id: teamIdArg || null
+}, { blocking: true });
+
+if (sessionStartHook.blocked) {
+  const errorMsg = `Session blocked by hook policy: ${sessionStartHook.reason || 'session_start rejected'}`;
+  if (jsonlMode) {
+    jsonlOut('error', { message: errorMsg, code: 'HOOK_SESSION_START_BLOCKED' }, 'stderr');
+  } else {
+    console.error(errorMsg);
+  }
+  process.exit(1);
+}
+
 const session = SessionModel.create(sessionId, { template, name: templateName });
-session.spec.messages = [
-  { role: 'user', content: userPrompt, timestamp: new Date().toISOString() }
-];
+if (teamIdArg) {
+  session.metadata.team_id = teamIdArg;
+}
+
+const promptSubmitHook = await triggerHook('user_prompt_submit', {
+  session_id: sessionId,
+  user_message: userPrompt,
+  channel: 'cli'
+}, { blocking: true });
+
+if (promptSubmitHook.blocked) {
+  const errorMsg = `User prompt blocked by hook policy: ${promptSubmitHook.reason || 'user_prompt_submit rejected'}`;
+  if (jsonlMode) {
+    jsonlOut('error', { message: errorMsg, code: 'HOOK_USER_PROMPT_BLOCKED' }, 'stderr');
+  } else {
+    console.error(errorMsg);
+  }
+  await persistSession(sessionId, session);
+  process.exit(1);
+}
+
+session.spec.messages = [{ role: 'user', content: userPrompt, timestamp: new Date().toISOString() }];
 await persistSession(sessionId, session);
 
 // Log user prompt in JSONL mode
@@ -963,6 +1113,23 @@ async function executeSingleTool(sessionId, toolCall) {
   const argsStr = toolCall.function.arguments;
   let cmdArgs = {};
   try { cmdArgs = JSON.parse(argsStr); } catch (e) {}
+
+  const preToolHook = await triggerHook('pre_tool_call', {
+    session_id: sessionId,
+    tool_name: toolName,
+    tool_input: cmdArgs,
+    raw_tool_call: toolCall
+  }, { blocking: true });
+
+  if (preToolHook.blocked) {
+    return {
+      role: 'tool',
+      tool_call_id: toolCall.id,
+      name: toolName,
+      content: `Error: Tool invocation blocked by hook policy: ${preToolHook.reason || 'pre_tool_call rejected'}`,
+      timestamp: new Date().toISOString()
+    };
+  }
   
   if (jsonlMode) {
     jsonlOut('tool_call', { name: toolName, arguments: cmdArgs, tool_call_id: toolCall.id }, 'stderr');
@@ -970,7 +1137,7 @@ async function executeSingleTool(sessionId, toolCall) {
     Utils.logInfo(`Tool Call: ${toolName}(${argsStr})`);
   }
   const handler = globals.dslRegistry.get(toolName);
-  if (!globals.subdContext?.agentMode && !handler) return { role: 'tool', tool_call_id: toolCall.id, name: toolName, content: `Error: Tool ${toolName} not found`, timestamp: new Date().toISOString() };
+  if (!handler) return { role: 'tool', tool_call_id: toolCall.id, name: toolName, content: `Error: Tool ${toolName} not found`, timestamp: new Date().toISOString() };
 
   const toolStartTime = Date.now();
   try {
@@ -992,6 +1159,24 @@ async function executeSingleTool(sessionId, toolCall) {
 
     logPerf(`tool:${toolName}`, { 'duration(s)': toolDuration });
 
+    if (result.status === 'success') {
+      await triggerHook('post_tool_call', {
+        session_id: sessionId,
+        tool_name: toolName,
+        tool_input: cmdArgs,
+        tool_output: result.result,
+        duration_ms: Math.round((Date.now() - toolStartTime))
+      });
+    } else {
+      await triggerHook('post_tool_failure', {
+        session_id: sessionId,
+        tool_name: toolName,
+        tool_input: cmdArgs,
+        error_message: result.error || 'unknown tool failure',
+        exit_code: 1
+      });
+    }
+
     return { role: 'tool', tool_call_id: toolCall.id, name: toolName, content, timestamp: new Date().toISOString() };
   } catch (e) {
     const toolDuration = (Date.now() - toolStartTime) / 1000;
@@ -1004,6 +1189,15 @@ async function executeSingleTool(sessionId, toolCall) {
         console.error(`\x1b[36m[TOOL RESULT] ${content}\x1b[0m`);
       }
     }
+
+    await triggerHook('post_tool_failure', {
+      session_id: sessionId,
+      tool_name: toolName,
+      tool_input: cmdArgs,
+      error_message: e.message,
+      exit_code: 1
+    });
+
     return { role: 'tool', tool_call_id: toolCall.id, name: toolName, content, timestamp: new Date().toISOString() };
   }
 }
@@ -1029,6 +1223,24 @@ async function runLoop() {
   while (running) {
     const messages = await getChatMessages(sessionId);
     const tools = await getTools(sessionId);
+
+    const beforeAgentHook = await triggerHook('before_agent_start', {
+      session_id: sessionId,
+      full_context_preview: JSON.stringify(messages).slice(0, 2000),
+      model_being_used: modelStr
+    }, { blocking: true });
+
+    if (beforeAgentHook.blocked) {
+      const currentSession = SessionModel.load(sessionId);
+      currentSession.spec.messages.push({
+        role: 'user',
+        content: `Turn blocked by hook policy: ${beforeAgentHook.reason || 'before_agent_start rejected'}`,
+        timestamp: new Date().toISOString()
+      });
+      await persistSession(sessionId, currentSession);
+      Utils.logWarn('before_agent_start blocked current turn; waiting for next turn.');
+      continue;
+    }
 
     Utils.logInfo(`Calling AI with ${tools?.length || 0} tools...${effectiveTurnLimit ? ` (turn ${turnCount + 1}/${effectiveTurnLimit})` : ''}`);
     turnCount++;
@@ -1084,6 +1296,26 @@ async function runLoop() {
     
     combinedMessage.timestamp = new Date().toISOString();
     combinedMessage.finish_reason = finishReason;
+
+    const assistantEmitHook = await triggerHook('assistant_response_emit', {
+      session_id: sessionId,
+      assistant_message: combinedMessage.content,
+      assistant_message_id: combinedMessage.timestamp,
+      response_channel: 'cli',
+      rejection_prompt_template: 'assistant_response_rejected'
+    }, { blocking: true });
+
+    if (assistantEmitHook.blocked) {
+      const currentSession = SessionModel.load(sessionId);
+      currentSession.spec.messages.push({
+        role: 'user',
+        content: `Assistant response rejected by hook policy: ${assistantEmitHook.reason || 'assistant_response_emit rejected'}`,
+        timestamp: new Date().toISOString()
+      });
+      await persistSession(sessionId, currentSession);
+      Utils.logWarn('assistant_response_emit blocked assistant output; injected rejection prompt and continuing.');
+      continue;
+    }
     
     const currentSession = SessionModel.load(sessionId);
     currentSession.spec.messages.push(combinedMessage);
@@ -1097,6 +1329,7 @@ async function runLoop() {
       // Check turn limit after processing tool calls
       if (effectiveTurnLimit && turnCount >= effectiveTurnLimit) {
         const errorMsg = `No answer could be returned; max turns (${effectiveTurnLimit}) reached.`;
+        await appendMaxTurnsPolicyMessage(sessionId, effectiveTurnLimit);
         if (jsonlMode) {
           jsonlOut('error', { message: errorMsg, code: 'MAX_TURNS_REACHED' }, 'stderr');
         } else {
@@ -1113,6 +1346,24 @@ async function runLoop() {
       
       // Only terminate when finish_reason indicates completion
       if (finishReason === 'stop' || finishReason === 'end_turn') {
+        const stopHook = await triggerHook('agent_terminated_stop', {
+          session_id: sessionId,
+          final_decision: 'stop',
+          next_action_hint: ''
+        }, { blocking: true });
+
+        if (stopHook.blocked) {
+          const currentSession = SessionModel.load(sessionId);
+          currentSession.spec.messages.push({
+            role: 'user',
+            content: `Stop denied by hook policy: ${stopHook.reason || 'agent_terminated_stop rejected'}`,
+            timestamp: new Date().toISOString()
+          });
+          await persistSession(sessionId, currentSession);
+          Utils.logWarn('agent_terminated_stop blocked termination; continuing loop.');
+          continue;
+        }
+
         // If validate function is present, eval it against the response
         if (validateFn) {
           let validationResult;
@@ -1159,6 +1410,7 @@ async function runLoop() {
             // Check turn limit before continuing
             if (effectiveTurnLimit && turnCount >= effectiveTurnLimit) {
               const errorMsg = `No answer could be returned; max turns (${effectiveTurnLimit}) reached.`;
+              await appendMaxTurnsPolicyMessage(sessionId, effectiveTurnLimit);
               if (jsonlMode) {
                 jsonlOut('error', { message: errorMsg, code: 'MAX_TURNS_REACHED' }, 'stderr');
               } else {
@@ -1209,6 +1461,12 @@ async function runLoop() {
                 process.stdout.write(finalOutput);
               }
             }
+            await triggerHook('session_end', {
+              session_id: sessionId,
+              exit_code: 0,
+              duration_seconds: Number(((Date.now() - processStartTime) / 1000).toFixed(3)),
+              final_token_count: response?.usage?.completion_tokens || 0
+            });
             running = false;
           }
         } else {
@@ -1230,6 +1488,12 @@ async function runLoop() {
               process.stdout.write(normalizedFinalOutput + '\n');
             }
           }
+          await triggerHook('session_end', {
+            session_id: sessionId,
+            exit_code: 0,
+            duration_seconds: Number(((Date.now() - processStartTime) / 1000).toFixed(3)),
+            final_token_count: response?.usage?.completion_tokens || 0
+          });
           running = false;
         }
       } else {

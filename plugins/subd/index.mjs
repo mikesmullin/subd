@@ -3,12 +3,15 @@ import { spawn } from 'child_process';
 
 export class SubdPlugin {
   constructor() {
+    this.backgroundRuns = new Map();
+    this.nextRunId = 1;
     globals.pluginsRegistry.set('subd', this);
     this.registerTools();
   }
 
   registerTools() {
     globals.dslRegistry.set('subd', this.launchSubd.bind(this));
+    globals.dslRegistry.set('subd__await', this.awaitSubd.bind(this));
   }
 
   get definition() {
@@ -31,12 +34,28 @@ export class SubdPlugin {
               strict: { type: 'boolean', description: 'Enable --strict.' },
               read_stdin: { type: 'boolean', description: 'Enable -i.' },
               sandbox: { type: 'boolean', description: 'Enable -s for child run.' },
+              wait: { type: 'boolean', description: 'Wait for completion (default true). Set false to launch in background.' },
               args: {
                 type: 'array',
                 description: 'Raw CLI args. If provided, all other fields are ignored.',
                 items: { type: 'string' }
               }
             }
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'subd__await',
+          description: 'Wait for a previously launched background subd run by run_id.',
+          parameters: {
+            type: 'object',
+            properties: {
+              run_id: { type: 'string', description: 'Run id returned by subd(wait=false).' },
+              timeout_ms: { type: 'number', description: 'Optional timeout in milliseconds.' }
+            },
+            required: ['run_id']
           }
         }
       }
@@ -96,10 +115,117 @@ export class SubdPlugin {
     });
   }
 
+  launchLocalBackground(forwardArgs) {
+    const cliPath = `${globals.PROJECT_ROOT}/cli.mjs`;
+    const child = spawn(process.execPath, [cliPath, ...forwardArgs], {
+      cwd: process.cwd(),
+      env: process.env
+    });
+
+    const runId = `subd_run_${this.nextRunId++}`;
+    const MAX_BUFFER = 65536;
+    const cap = (text) => text.length > MAX_BUFFER ? text.slice(-MAX_BUFFER) : text;
+
+    let stdout = '';
+    let stderr = '';
+
+    const completion = new Promise((resolve) => {
+      child.stdout.on('data', (chunk) => {
+        stdout = cap(stdout + chunk.toString());
+      });
+
+      child.stderr.on('data', (chunk) => {
+        stderr = cap(stderr + chunk.toString());
+      });
+
+      child.on('error', (error) => {
+        resolve({ ok: false, exitCode: 1, stdout, stderr, error: error.message, runId, pid: child.pid ?? null });
+      });
+
+      child.on('close', (code) => {
+        resolve({ ok: code === 0, exitCode: code ?? 1, stdout, stderr, runId, pid: child.pid ?? null });
+      });
+    });
+
+    this.backgroundRuns.set(runId, {
+      runId,
+      pid: child.pid ?? null,
+      startedAt: new Date().toISOString(),
+      completion
+    });
+
+    completion.finally(() => {
+      this.backgroundRuns.delete(runId);
+    });
+
+    return { runId, pid: child.pid ?? null };
+  }
+
+  async awaitSubd(args = {}) {
+    try {
+      const runId = typeof args.run_id === 'string' ? args.run_id.trim() : '';
+      if (!runId) {
+        return { status: 'failure', error: 'subd__await requires run_id' };
+      }
+
+      const run = this.backgroundRuns.get(runId);
+      if (!run) {
+        return { status: 'failure', error: `Unknown or completed run_id: ${runId}` };
+      }
+
+      const timeoutMs = Math.max(0, Number(args.timeout_ms || 0));
+      let result;
+
+      if (timeoutMs > 0) {
+        result = await Promise.race([
+          run.completion,
+          new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), timeoutMs))
+        ]);
+
+        if (result?.timedOut) {
+          return {
+            status: 'success',
+            result: {
+              run_id: runId,
+              pid: run.pid,
+              running: true,
+              timed_out: true
+            }
+          };
+        }
+      } else {
+        result = await run.completion;
+      }
+
+      if (!result?.ok) {
+        return {
+          status: 'failure',
+          error: result?.error || result?.stderr || `subd run failed with exit code ${result?.exitCode ?? 1}`
+        };
+      }
+
+      return {
+        status: 'success',
+        result: {
+          run_id: runId,
+          pid: run.pid,
+          exit_code: result.exitCode ?? 0,
+          output: result.stdout || result.stderr || `(subd exited ${result.exitCode ?? 0})`
+        }
+      };
+    } catch (error) {
+      return {
+        status: 'failure',
+        error: error.message
+      };
+    }
+  }
+
   async launchSubd(args = {}) {
     try {
       const forwardArgs = this.buildArgs(args);
       const context = globals.subdContext || {};
+      const shouldWait = args.wait !== false;
 
       if (context.agentMode && typeof context.requestSpawnSubdFromHost === 'function') {
         const spawnArgs = [...forwardArgs];
@@ -107,7 +233,7 @@ export class SubdPlugin {
           spawnArgs.unshift('-s');
         }
 
-        const response = await context.requestSpawnSubdFromHost(spawnArgs);
+        const response = await context.requestSpawnSubdFromHost(spawnArgs, { wait: shouldWait });
         if (!response?.ok) {
           return {
             status: 'failure',
@@ -115,9 +241,33 @@ export class SubdPlugin {
           };
         }
 
+        if (!shouldWait) {
+          return {
+            status: 'success',
+            result: {
+              launched: true,
+              wait: false,
+              pid: response.pid ?? null
+            }
+          };
+        }
+
         return {
           status: 'success',
           result: response.stdout || response.stderr || `(subd exited ${response.exitCode ?? 0})`
+        };
+      }
+
+      if (!shouldWait) {
+        const launched = this.launchLocalBackground(forwardArgs);
+        return {
+          status: 'success',
+          result: {
+            launched: true,
+            wait: false,
+            run_id: launched.runId,
+            pid: launched.pid
+          }
         };
       }
 

@@ -1,0 +1,20 @@
+---
+apiVersion: daemon/v1
+kind: Agent
+metadata:
+  description: SDET specialist for guinea pig website QA
+  model: xai:grok-4-fast-reasoning
+  max_turns: 8
+  tools:
+    - fs__directory__list
+    - fs__file__view
+    - fs__file__create
+    - fs__file__edit
+    - fs__patch__apply
+    - fs__directory__create
+    - fs__grep
+spec:
+  system_prompt: |
+    You are an SDET specialist.
+    Create practical QA artifacts for a static website under tmp/guinea-site/tests and tmp/guinea-site/qa.
+    Focus on checks for page count, navigation consistency, and required sections.

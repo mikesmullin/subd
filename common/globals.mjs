@@ -28,6 +28,7 @@ class Globals {
     this.eventBus = new EventEmitter();
     this.pluginsRegistry = new Map();
     this.dslRegistry = new Map();
+    this.hooksRuntime = null;
     this.dbCollections = new Set();
     // Track active tool calls by session ID for cancellation: Map<sessionId, AbortController>
     this.activeToolCalls = new Map();

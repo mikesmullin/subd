@@ -3,6 +3,7 @@ import { globals } from '../../../common/globals.mjs';
 import { Utils } from '../../../common/utils.mjs';
 import { FSM } from '../../../common/fsm.mjs';
 import path from 'path';
+import crypto from 'crypto';
 
 // Session states
 export const SessionState = {
@@ -56,7 +57,10 @@ export class SessionModel {
 
   static generateId() {
     this.init();
-    return (this.nextSessionId++).toString();
+    const ts = Date.now();
+    const pid = process.pid;
+    const rand = crypto.randomBytes(2).toString('hex');
+    return `${ts}-${pid}-${rand}`;
   }
 
   static resetId() {
@@ -105,6 +109,7 @@ export class SessionModel {
         name: data.name,
         containerId,  // Unique container name: {sessionId}_{unixTimestamp}
         created: createdAt.toISOString(),
+        last_pid: process.pid,
         status: SessionState.PENDING,  // Start in PENDING state
         tools: data.template?.spec?.tools || data.template?.metadata?.tools || [],
         labels: data.template?.metadata?.labels || [],

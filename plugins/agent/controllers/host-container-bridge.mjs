@@ -356,6 +356,21 @@ class Bridge {
       Utils.logTrace(`[Bridge.handleApprovalRequest] sendToHost returned: ${JSON.stringify(result)}`);
       return result;
     }
+
+    if (globals.hooksRuntime) {
+      const hookResult = await globals.hooksRuntime.trigger('permission_request', {
+        session_id: sessionId,
+        permission_type: approvalType || 'shell',
+        resource_path: description || ''
+      }, { blocking: true });
+
+      if (hookResult?.blocked) {
+        return {
+          success: false,
+          error: hookResult.reason || 'permission_request blocked by hook policy'
+        };
+      }
+    }
     
     // Legacy approval path (human plugin removed): keep non-blocking compatibility behavior.
     Utils.logWarn(`[Bridge.handleApprovalRequest] Human approval workflow is disabled. Auto-approving legacy request.`);

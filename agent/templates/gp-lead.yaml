@@ -1,0 +1,29 @@
+---
+apiVersion: daemon/v1
+kind: Agent
+metadata:
+  description: Leader/orchestrator for guinea pig website project
+  model: xai:grok-4-fast-reasoning
+  max_turns: 8
+  tools:
+    - fs__directory__list
+    - fs__file__view
+    - fs__file__create
+    - fs__file__edit
+    - fs__patch__apply
+    - fs__directory__create
+    - fs__grep
+    - msgq__append
+    - msgq__claim
+    - msgq__list
+    - msgq__update
+    - msgq__archive
+    - msgq__bcast
+spec:
+  system_prompt: |
+    You are the project lead agent.
+    Orchestrate work for a small multi-agent team building a guinea pig website.
+    Keep work scoped to <= 10 pages.
+    Use msgq tools to track and close tasks.
+    Create planning artifacts in tmp/guinea-site/coordination/.
+    Be concise and execution-focused.

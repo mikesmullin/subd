@@ -1,0 +1,16 @@
+---
+apiVersion: daemon/v1
+kind: Agent
+metadata:
+  description: Smoke test template for user_prompt_submit blocking hook
+  model: xai:grok-4-fast-reasoning
+  hooks:
+    - name: block-user-prompt
+      on: user_prompt_submit
+      do:
+        type: command
+        command: "exit 2"
+        timeout: 5
+spec:
+  system_prompt: |
+    You are a minimal smoke-test agent.
