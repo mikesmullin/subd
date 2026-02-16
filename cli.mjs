@@ -10,9 +10,11 @@ import { spawn, spawnSync } from 'child_process';
 import { globals } from './common/globals.mjs';
 import { Utils } from './common/utils.mjs';
 import { HooksRuntime } from './common/hooks-runtime.mjs';
+import { createPromptIncludeFn } from './common/prompt-includes.mjs';
 import { checkCmdProxyCommand, loadCmdProxyAllowlist } from './plugins/shell/cmd-proxy-allowlist.mjs';
 import { SessionModel, SessionState } from './plugins/agent/models/session.mjs';
 import { TemplateModel } from './plugins/agent/models/template.mjs';
+import { HeartbeatRuntime } from './plugins/heartbeat/index.mjs';
 
 // Provider registry
 const providerRegistry = {
@@ -698,6 +700,61 @@ if (args[0] === 'clean') {
   process.exit(0);
 }
 
+if (args[0] === 'cron') {
+  const mode = args[1];
+  const cronArgs = args.slice(2);
+  const jsonlMode = cronArgs.includes('-j') || cronArgs.includes('--jsonl');
+  const verbose = cronArgs.includes('-v') || cronArgs.includes('--verbose');
+
+  if (!mode || !['watch', 'once'].includes(mode)) {
+    console.error('Usage: subd cron <watch|once> [-j|--jsonl] [-v|--verbose]');
+    process.exit(1);
+  }
+
+  Utils.setLogLevel(verbose ? 'debug' : 'warn');
+  Utils.setLogHandler((level, message) => {
+    if (Utils.shouldLog(level)) {
+      if (jsonlMode) {
+        const obj = { type: 'log', timestamp: new Date().toISOString(), level, message };
+        console.error(JSON.stringify(obj));
+      } else {
+        console.error(message);
+      }
+    }
+  });
+
+  const hooksRuntime = new HooksRuntime({
+    template: {},
+    cliPath: path.resolve(import.meta.dirname, 'cli.mjs')
+  });
+  await hooksRuntime.init();
+
+  const heartbeatRuntime = new HeartbeatRuntime({
+    cliPath: path.resolve(import.meta.dirname, 'cli.mjs'),
+    hooksRuntime,
+    jsonlMode,
+    verbose
+  });
+
+  try {
+    if (mode === 'once') {
+      const exitCode = await heartbeatRuntime.runOnce();
+      process.exit(exitCode);
+    }
+
+    const exitCode = await heartbeatRuntime.runWatch();
+    process.exit(exitCode);
+  } catch (error) {
+    if (jsonlMode) {
+      const obj = { type: 'heartbeat', timestamp: new Date().toISOString(), outcome: 'error', summary: error.message };
+      console.log(JSON.stringify(obj));
+    } else {
+      console.error(`ERROR: ${error.message}`);
+    }
+    process.exit(1);
+  }
+}
+
 // Parse Args
 let templatePath = null;
 let dataYaml = null;
@@ -1068,11 +1125,14 @@ const maxValidationFails = template.metadata?.max_validation_fails || null;
 // Render System Prompt
 if (template.spec && template.spec.system_prompt) {
   try {
-    template.spec.system_prompt = await ejs.render(template.spec.system_prompt, { 
+    const includePrompt = createPromptIncludeFn({ rootDir: process.cwd(), maxDepth: 10 });
+
+    template.spec.system_prompt = await ejs.render(template.spec.system_prompt, {
       ...data,
       process,
       os,
-      readStdin
+      readStdin,
+      includePrompt
     }, { async: true });
   } catch (e) {
     console.error(`Failed to render system prompt: ${e.message}`);

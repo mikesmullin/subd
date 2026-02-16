@@ -15,6 +15,9 @@ log:
 container:
   runtime: podman
   image: subd:latest
+heartbeat:
+  system_prompt_file: agent/snippets/heartbeat/global.ejs
+  watch_tick_seconds: 60
 dashboard:
   widgets:
     - name: agent.sessions

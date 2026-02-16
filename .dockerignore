@@ -33,6 +33,7 @@ agent/sessions/
 agent/templates/
 agent/msgq/
 agent/workspaces/
+agent/state/heartbeat.yaml
 
 # Test files
 tests/
