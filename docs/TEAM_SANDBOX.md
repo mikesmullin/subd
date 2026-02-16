@@ -20,7 +20,7 @@ rm -rf tmp/guinea-site
 mkdir -p tmp/guinea-site/coordination tmp/e2e
 bun cli.mjs clean
 bun cli.mjs -s \
-  -V "$PWD/tmp/guinea-site:/workspace/subd/tmp/guinea-site" \
+   --volume "$PWD/tmp/guinea-site:/workspace/subd/tmp/guinea-site" \
   -t gp-lead-pull -v \
   "Execute the pull-based guinea pig website workflow now with all agents sandboxed. Use team__create with exactly three workers where workers[].sandbox=true and set team__create sandbox_volumes to ['/workspace/subd/tmp/guinea-site:/workspace/subd/tmp/guinea-site']. Use only msgq__append/msgq__await/msgq__list/team__create/team__destroy for orchestration (do not write agent/msgq files via fs tools). Workers must never use fs tools for agent/msgq paths; use msgq tools only. Wait for exactly 3 archived task messages, consume lead notes, then call team__destroy with force_after_ms=3000 and return archived ids." \
   > tmp/e2e/lead-pull-e2e-sandbox.stdout.log 2>&1

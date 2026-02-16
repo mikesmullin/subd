@@ -184,10 +184,10 @@ export class TeamPlugin {
       }
 
       const sandboxEnabled = base.includes('-s');
-      const hasVolumeArg = base.includes('--sandbox-volume');
+      const hasVolumeArg = base.includes('--volume') || base.includes('--sandbox-volume');
       if (sandboxEnabled && !hasVolumeArg && effectiveVolumes.length > 0) {
         for (const spec of effectiveVolumes) {
-          base.push('--sandbox-volume', spec);
+          base.push('--volume', spec);
         }
       }
 
@@ -210,7 +210,7 @@ export class TeamPlugin {
     if (worker.sandbox === true) built.push('-s');
     if (worker.sandbox === true && effectiveVolumes.length > 0) {
       for (const spec of effectiveVolumes) {
-        built.push('--sandbox-volume', spec);
+        built.push('--volume', spec);
       }
     }
 

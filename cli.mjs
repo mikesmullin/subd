@@ -738,7 +738,7 @@ for (let i = 0; i < args.length; i++) {
     sessionIdArg = args[++i];
   } else if (args[i] === '--team-id') {
     teamIdArg = args[++i];
-  } else if (args[i] === '--sandbox-volume' || args[i] === '-V') {
+  } else if (args[i] === '--volume' || args[i] === '--sandbox-volume' || args[i] === '-V') {
     sandboxVolumeSpecs.push(args[++i]);
   } else {
     promptParts.push(args[i]);
@@ -862,7 +862,7 @@ async function triggerHook(event, payload = {}, { blocking = false } = {}) {
 const userPrompt = promptParts.join(' ');
 
 if (!templatePath || !userPrompt) {
-  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] [-s] [-V <host_path:container_path[:options]> ...] [--sandbox-volume <host_path:container_path[:options]> ...] [--session-id <id>] [--team-id <team>] <prompt...>');
+  console.error('Usage: subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-j] [-i] [-l <turns>] [-s] [-V <host_path:container_path[:options]> ...] [--volume <host_path:container_path[:options]> ...] [--session-id <id>] [--team-id <team>] <prompt...>');
   process.exit(1);
 }
 

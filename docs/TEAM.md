@@ -259,7 +259,7 @@ rm -rf tmp/guinea-site
 mkdir -p tmp/guinea-site tmp/guinea-site/coordination
 bun cli.mjs clean
 bun cli.mjs -s \
-  -V "$PWD/tmp/guinea-site:/workspace/subd/tmp/guinea-site" \
+  --volume "$PWD/tmp/guinea-site:/workspace/subd/tmp/guinea-site" \
   -t gp-lead-pull -v -o tmp/guinea-site/coordination/lead-pull-e2e-sandbox.log \
   "Execute the pull-based guinea pig website workflow now with all agents sandboxed. Use team__create with workers[].sandbox=true and set team__create sandbox_volumes to ['/workspace/subd/tmp/guinea-site:/workspace/subd/tmp/guinea-site']. Keep all project outputs in tmp/guinea-site, wait for 3 archived tasks, consume lead notes, destroy team, and return archived ids."
 ```
