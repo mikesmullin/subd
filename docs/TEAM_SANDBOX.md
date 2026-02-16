@@ -15,7 +15,6 @@ podman build -t subd:latest .
 ## Full Sandboxed E2E Command
 
 ```bash
-podman unshare rm -rf tmp/guinea-site 2>/dev/null || true
 rm -rf tmp/guinea-site
 mkdir -p tmp/guinea-site/coordination tmp/e2e
 bun cli.mjs clean
@@ -79,9 +78,9 @@ Expected:
 
 ## Troubleshooting
 
-1. **`rm -rf tmp/guinea-site` permission denied**
-   - Happens after user-namespace-mapped container writes.
-   - Use:
+1. **`rm -rf tmp/guinea-site` permission denied (legacy runs)**
+   - Usually from artifacts created before `--userns=keep-id` was enabled, or from externally launched containers with different mapping.
+   - One-time recovery:
 
 ```bash
 podman unshare rm -rf tmp/guinea-site

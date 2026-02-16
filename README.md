@@ -29,7 +29,7 @@ subd -t <template.yaml> [-d <yaml_data>] [-o output.log] [-v] [-l <turns>] [-s] 
 
 When a mount targets `/workspace/subd/...`, `subd` automatically adds a compatibility alias mount to `/app/...` for the same host path. This ensures relative paths like `tmp/guinea-site/...` (resolved from container working dir `/app`) still land on the shared host volume.
 
-Before sandbox launch, `subd` ensures `tmp/` and `tmp/guinea-site/` exist and sets permissions to `0777` so bind-mounted paths are writable from container workers.
+For Podman runtimes, sandbox launches use `--userns=keep-id` (and `--user <host_uid>:<host_gid>` when available) so bind-mounted files are owned/writable by the host user without routine `podman unshare` cleanup.
 - `-a`: (Internal) Agent/container mode. Set automatically for the process running inside a sandbox container; not intended for normal manual use.
 - `prompt...`: (Required) The initial user prompt.
 

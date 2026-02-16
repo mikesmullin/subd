@@ -210,7 +210,7 @@ function spawnSubdOnHost(forwardArgs, options = {}) {
   });
 }
 
-function prepareSandboxWritableDirs() {
+function ensureSandboxDirs() {
   const dirs = [
     path.resolve(process.cwd(), 'tmp'),
     path.resolve(process.cwd(), 'tmp/guinea-site')
@@ -219,11 +219,21 @@ function prepareSandboxWritableDirs() {
   for (const dir of dirs) {
     try {
       fs.mkdirSync(dir, { recursive: true });
-      fs.chmodSync(dir, 0o777);
     } catch (error) {
-      Utils.logWarn(`Failed to set sandbox writable permissions on ${dir}: ${error.message}`);
+      Utils.logWarn(`Failed to prepare sandbox directory ${dir}: ${error.message}`);
     }
   }
+}
+
+function getSandboxRuntimeArgs() {
+  const runtime = String(globals.containerRuntime || '').toLowerCase();
+  if (!runtime.includes('podman')) return [];
+
+  const args = ['--userns=keep-id'];
+  if (typeof process.getuid === 'function' && typeof process.getgid === 'function') {
+    args.push('--user', `${process.getuid()}:${process.getgid()}`);
+  }
+  return args;
 }
 
 async function executeToolOnHost(toolName, args, context = {}, toolOptions = null) {
@@ -894,9 +904,11 @@ if (sandboxMode && !agentMode) {
 
     const forwardedArgs = sanitizeForwardArgs(args);
     const volumeArgs = sandboxVolumeSpecs.flatMap((spec) => ['-v', spec]);
-    prepareSandboxWritableDirs();
+    ensureSandboxDirs();
+    const runtimeArgs = getSandboxRuntimeArgs();
     const containerArgs = [
       'run', '--rm', '--init',
+      ...runtimeArgs,
       '--name', containerName,
       '--label', `subd.sandbox.run=${runId}`,
       '-e', `SUBD_SANDBOX_HOST=${sandboxHost}`,
