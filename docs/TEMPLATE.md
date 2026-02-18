@@ -173,6 +173,7 @@ metadata:
 | Name | Params | Returns | Description |
 |---|---|---|---|
 | `readStdin` | none | `Promise<string>` | Reads stdin content when `-i` is provided. |
+| `shell` | `command: string, options?: object` | `string\|Buffer` | Executes a command via `execSync` and returns output (trimmed by default). |
 | `includePrompt` | `includePath: string` | `string` | Includes file contents using workspace-relative path with safety checks. |
 | `process` | n/a | object | Node/Bun process object (cwd, env, platform, etc.). |
 | `os` | n/a | object | Node `os` module helpers (`release()`, etc.). |
@@ -196,6 +197,9 @@ spec:
 
     Shared rules:
     <%- includePrompt('agent/snippets/shared/rules.md') %>
+
+    Tool help:
+    <%= shell('skills memo') %>
 
     Conversation history:
     <%= await readStdin() %>

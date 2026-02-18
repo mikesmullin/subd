@@ -6,7 +6,7 @@ import yaml from 'js-yaml';
 import os from 'os';
 import net from 'net';
 import crypto from 'crypto';
-import { spawn, spawnSync } from 'child_process';
+import { execSync, spawn, spawnSync } from 'child_process';
 import { globals } from './common/globals.mjs';
 import { Utils } from './common/utils.mjs';
 import { HooksRuntime } from './common/hooks-runtime.mjs';
@@ -845,6 +845,26 @@ async function readStdin() {
   return stdinCache;
 }
 
+function shell(command, options = {}) {
+  if (typeof command !== 'string' || !command.trim()) {
+    throw new Error('shell(command): command must be a non-empty string');
+  }
+
+  const {
+    trim = true,
+    encoding = 'utf8',
+    ...execOptions
+  } = options || {};
+
+  const output = execSync(command, {
+    encoding,
+    ...execOptions
+  });
+
+  if (typeof output !== 'string') return output;
+  return trim ? output.trim() : output;
+}
+
 // JSONL output helper for machine-parseable output
 // Types: system_prompt, user_prompt, assistant, tool_call, tool_result, thoughts, perf, error, info, final
 function jsonlOut(type, data, stream = 'stdout') {
@@ -1132,6 +1152,7 @@ if (template.spec && template.spec.system_prompt) {
       process,
       os,
       readStdin,
+      shell,
       includePrompt
     }, { async: true });
   } catch (e) {
