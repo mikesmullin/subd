@@ -725,7 +725,8 @@ if (args[0] === 'cron') {
 
   const hooksRuntime = new HooksRuntime({
     template: {},
-    cliPath: path.resolve(import.meta.dirname, 'cli.mjs')
+    cliPath: path.resolve(import.meta.dirname, 'cli.mjs'),
+    verbose
   });
   await hooksRuntime.init();
 
@@ -1070,10 +1071,24 @@ if (sandboxMode && !agentMode) {
 //   1. cwd/.agent/templates/<template_file>
 //   2. ~/.config/daemon/agent/templates/<template_file>
 //   3. <workspace>/agent/templates/<template_file>
+//   4. <workspace>/plugins/*/.agent/templates/<template_file> (lowest precedence)
 // If template_file has no extension, .yaml is appended
 function resolveTemplatePath(p) {
   // Normalize: append .yaml if no extension provided
   const templateFile = path.extname(p) ? p : p + '.yaml';
+
+  const pluginTemplatePaths = [];
+  const pluginsRoot = path.resolve(globals.PROJECT_ROOT, 'plugins');
+  if (fs.existsSync(pluginsRoot) && fs.statSync(pluginsRoot).isDirectory()) {
+    const pluginDirs = fs.readdirSync(pluginsRoot)
+      .map((name) => path.resolve(pluginsRoot, name))
+      .filter((pluginPath) => fs.existsSync(pluginPath) && fs.statSync(pluginPath).isDirectory())
+      .sort();
+
+    for (const pluginDir of pluginDirs) {
+      pluginTemplatePaths.push(path.resolve(pluginDir, '.agent/templates', templateFile));
+    }
+  }
   
   const searchPaths = [
     // Current directory (where process is running)
@@ -1081,7 +1096,9 @@ function resolveTemplatePath(p) {
     // Home directory config
     path.resolve(os.homedir(), '.config/daemon/agent/templates', templateFile),
     // Workspace directory (where the .mjs files are located)
-    path.resolve(globals.dbPaths.templates, templateFile)
+    path.resolve(globals.dbPaths.templates, templateFile),
+    // Plugin-provided templates
+    ...pluginTemplatePaths
   ];
 
   for (const sp of searchPaths) {
@@ -1119,7 +1136,8 @@ if (agentMode) {
 const template = yaml.load(templateContent);
 const hooksRuntime = new HooksRuntime({
   template,
-  cliPath: path.resolve(import.meta.dirname, 'cli.mjs')
+  cliPath: path.resolve(import.meta.dirname, 'cli.mjs'),
+  verbose
 });
 await hooksRuntime.init();
 globals.hooksRuntime = hooksRuntime;
@@ -1552,9 +1570,16 @@ async function runLoop() {
     combinedMessage.timestamp = new Date().toISOString();
     combinedMessage.finish_reason = finishReason;
 
+    const sessionBeforeEmit = SessionModel.load(sessionId);
+    const messagesBeforeEmit = Array.isArray(sessionBeforeEmit?.spec?.messages)
+      ? sessionBeforeEmit.spec.messages
+      : [];
+    const lastUserMessage = [...messagesBeforeEmit].reverse().find((message) => message?.role === 'user')?.content || '';
+
     const assistantEmitHook = await triggerHook('assistant_response_emit', {
       session_id: sessionId,
       assistant_message: combinedMessage.content,
+      last_user_message: lastUserMessage,
       assistant_message_id: combinedMessage.timestamp,
       response_channel: 'cli',
       rejection_prompt_template: 'assistant_response_rejected'

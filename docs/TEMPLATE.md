@@ -120,47 +120,11 @@ spec:
 
 ---
 
-## Hooks schema (`metadata.hooks`)
+## Hooks
 
-Hooks can be defined in templates and are merged with:
-- repo hooks (`agent/hooks/*.yaml`)
-- user hooks (`~/.config/daemon/agent/hooks/*.yaml`)
+Hook behavior, schema, events, execution, and examples are documented in:
 
-### Hook fields
-
-| Field | Type | Required | Notes |
-|---|---|---:|---|
-| `name` | string | no | Optional hook identifier. |
-| `on` | string | yes | Event name (e.g. `session_start`, `heartbeat_result`). |
-| `enabled` | boolean | no | Defaults to enabled. |
-| `when` | object | no | Payload match conditions. |
-| `do.type` | string | yes | `command` or `agent`. |
-| `do.command` | string | command | Bash command; receives payload on stdin. |
-| `do.template` | string | agent | Template for hook agent action. |
-| `do.prompt` | string | agent | Prompt for hook agent action. |
-| `do.timeout` | number | no | Timeout in seconds. |
-
-### Hook examples
-
-```yaml
-metadata:
-  hooks:
-    - name: heartbeat-log
-      on: heartbeat_result
-      do:
-        type: command
-        command: "cat >/tmp/heartbeat-last.json"
-
-    - name: heartbeat-escalate
-      on: heartbeat_attention
-      when:
-        template: workspace-monitor
-      do:
-        type: agent
-        template: mini-solo
-        prompt: "Summarize the attention and propose next action."
-        timeout: 90
-```
+- [docs/HOOKS.md](docs/HOOKS.md)
 
 ---
 

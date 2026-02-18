@@ -1,60 +1,123 @@
 # HOOKS
 
-This document explains how hook automation works in `subd`.
+This document describes hook automation in `subd`.
 
 ## What Hooks Are
 
-Hooks are event-driven actions that run at specific points in an agent lifecycle.
+Hooks are event-driven automations that run at specific lifecycle points.
 
-- Use hooks to enforce policy (block unsafe actions).
-- Use hooks to automate side-effects (logging, notifications, memory recall/save).
-- Use hooks as optional automation; core tools still work without them.
+- Use hooks for policy checks and guardrails.
+- Use hooks for side effects (logging, notifications, memory workflows).
+- Keep blocking hooks fast and deterministic.
 
-## Where Hooks Are Loaded From
+## Load Order and Override Rule
 
-Hook definitions are merged using this precedence (highest first):
+Hook definitions are merged with this precedence (highest first):
 
-1. Template-local hooks (`metadata.hooks` in the selected template)
-2. User-global hooks (`~/.config/daemon/agent/hooks/*.yaml`)
-3. Repo-global hooks (`agent/hooks/*.yaml`)
+1. Template hooks (`metadata.hooks`)
+2. User hooks (`~/.config/daemon/agent/hooks/*.yaml`)
+3. Repo hooks (`agent/hooks/*.yaml`)
 
-Conflict rule:
+If two hooks share the same identity (`on` + `name`), higher precedence overrides lower precedence.
 
-- Same hook identity (`on` + `name`) is overridden by the higher-precedence source.
-
-## Hook Definition Format
-
-Minimal hook shape:
+## Hook Shape (Jobs First)
 
 ```yaml
-name: my-hook-name
-on: user_prompt_submit
-enabled: true
-when:
-  channel: cli
-do:
-  type: command
-  command: "./scripts/my-hook.sh"
-  timeout: 30
+hooks:
+  - name: mem-save-on-user-prompt
+    on: user_prompt_submit
+    when:
+      channel: cli
+    jobs:
+      memorize-user-facts:
+        steps:
+          - id: proposed
+            type: llm
+            template: memory-user-extract
+            stdin: |
+              User: ${{ user_message }}
+            prompt: go
+
+          - id: existing
+            type: shell
+            command: bun plugins/memory/scripts/retrieve-existing-memories.mjs
+            stdin: ${{ steps.proposed.output }}
+
+          - id: diff
+            type: llm
+            template: memory-maintain
+            prompt: go
+            data:
+              proposed_memories: ${{ parseJSON(steps.proposed.output).facts }}
+              existing_memories: ${{ parseJSON(steps.existing.output) }}
+
+          - id: apply
+            type: shell
+            command: bun plugins/memory/scripts/apply-memory-events.mjs
+            stdin: ${{ steps.diff.output }}
 ```
 
-Supported action types:
+## Execution Model
 
-- `command`: Runs shell command and passes hook payload JSON on stdin.
-- `agent`: Launches a nested `subd` run; requires `template` and `prompt`.
+### Jobs
 
-Example `agent` action:
+- `jobs.<job>.needs` defines DAG dependencies.
+- Jobs without `needs` can start immediately.
+- Jobs with satisfied `needs` can run in parallel.
+- Steps inside each job run serially.
 
-```yaml
-do:
-  type: agent
-  template: mini-solo
-  prompt: "Analyze this event and decide a follow-up action."
-  timeout: 90
-```
+### Steps
 
-## Hook Events (Current Set)
+- `id` is optional, but required for stable references.
+- Downstream references use `steps.<id>.output`.
+- Step output is always a single string from stdout.
 
+## Expressions
+
+### Syntax
+
+Use `${{ ... }}` in hook fields.
+
+### Available Roots
+
+- Event payload keys directly, e.g. `${{ user_message }}`
+- Step output by id, e.g. `${{ steps.proposed.output }}`
+
+### Functions
+
+- `parseJSON(string)`: parse string output into object/array
+
+`parseJSON(...)` is strict: invalid JSON fails the step.
+
+## Type Rules
+
+- `command`, `prompt`, `stdin`, and all `env` values must resolve to strings.
+- `data` values may resolve to any JSON-compatible type.
+
+## Supported Step Types
+
+- `shell` (shell command)
+- `llm` (nested `subd` template run)
+
+## `when` Conditions
+
+`when` filters hooks by payload values.
+
+Matchers:
+- Exact match: `when: { channel: cli }`
+- Any-of: `when: { response_channel: [cli, api] }`
+- Wildcard `*`: `when: { tool_name: "shell__*" }`
+
+All `when` keys must match.
+
+## Hook Events
+
+Current events include:
+
+- `heartbeat_tick`
+- `heartbeat_check_selected`
+- `heartbeat_result`
+- `heartbeat_attention`
 - `session_start`
 - `session_end`
 - `user_prompt_submit`
@@ -64,43 +127,27 @@ do:
 - `permission_request`
 - `post_tool_call`
 - `post_tool_failure`
-- `before_compaction`
-- `after_compaction`
 - `agent_terminated_stop`
-- `teammate_idle`
-- `subagent_start`
-- `subagent_stop`
-- `message_received`
 - `message_sending`
 - `message_sent`
 - `message_claimed`
 - `message_updated`
 - `message_archived`
+- `msgq_appended`
+- `msgq_claimed`
+- `msgq_updated`
+- `msgq_archived`
 - `task_completed`
 
-## Blocking vs Non-Blocking Behavior
+## Blocking Behavior
 
-A falsy hook result means:
+Hook failures can block selected events (for example `user_prompt_submit`, `before_agent_start`, `assistant_response_emit`, `pre_tool_call`, `permission_request`).
 
-- `command`: non-zero exit code
-- `agent`: non-success nested execution
+Post-event hooks are generally non-blocking and preserve the original event outcome.
 
-Selected blocking behaviors:
+## Hook Payload
 
-- `user_prompt_submit`: blocks prompt from entering context; turn is skipped.
-- `before_agent_start`: blocks current model turn.
-- `assistant_response_emit`: blocks assistant message write; rejection prompt is injected as user message.
-- `pre_tool_call`: blocks tool invocation.
-- `permission_request`: blocks/denies auto-approval path.
-- `agent_terminated_stop`: blocks termination and continues loop.
-
-Selected non-blocking/log-only behaviors:
-
-- `post_tool_call`, `post_tool_failure`, `message_sent`, `session_end` generally preserve the original result and skip only hook side-effects.
-
-## Hook Input Payload
-
-All hooks receive base JSON payload on stdin:
+All hooks receive a base JSON payload on stdin:
 
 ```json
 {
@@ -113,30 +160,4 @@ All hooks receive base JSON payload on stdin:
 }
 ```
 
-Event-specific fields are added depending on hook type, for example:
-
-- `user_prompt_submit`: `user_message`, `channel`
-- `assistant_response_emit`: `assistant_message`, `assistant_message_id`, `response_channel`
-- `pre_tool_call`: `tool_name`, `tool_input`, `raw_tool_call`
-- `post_tool_failure`: `error_message`, `exit_code`
-- `task_completed`: `task_id`, `result_summary`, `files_changed`
-
-## Practical Patterns
-
-1. Pre-prompt memory recall:
-
-- Attach a `user_prompt_submit` command hook.
-- Read payload from stdin.
-- Retrieve relevant memory and persist audit/log artifacts.
-
-2. Post-response memory save:
-
-- Attach an `assistant_response_emit` command hook.
-- Extract facts from `assistant_message`.
-- Write or update your memory store.
-
-## Notes
-
-- Compaction events are defined but may not fire until compaction flow is implemented.
-- Keep blocking hooks fast and deterministic to avoid stalling turns.
-- Prefer short timeouts and explicit failure messages for easier debugging.
+Event-specific fields are included as relevant (for example `user_message`, `assistant_message`, `tool_name`, `tool_input`, `error_message`).
